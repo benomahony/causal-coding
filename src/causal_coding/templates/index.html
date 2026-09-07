@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block body %}
+<header class="topbar">
+  <div class="topbar-title">
+    <span class="eyebrow">Causal coding</span>
+    <h1>Does agentic coding create commercial value?</h1>
+  </div>
+  <div class="segmented">
+    <button hx-get="/graph?view=overview&target={{ target }}" hx-target="#graph-panel" hx-swap="outerHTML" class="{% if view == 'overview' %}active{% endif %}">Commercial pathways</button>
+    <button hx-get="/graph?view=full&target={{ target }}" hx-target="#graph-panel" hx-swap="outerHTML" class="{% if view == 'full' %}active{% endif %}">Full causal model</button>
+  </div>
+  <div class="topbar-meta">
+    <span class="target-tag">Target · Commercial success</span>
+    <div class="legend">
+      <span><i class="dot supported"></i> literature</span>
+      <span><i class="dot mixed"></i> mixed</span>
+      <span><i class="dot mechanism"></i> mechanism</span>
+      <span><i class="dot hypothesis"></i> hypothesis</span>
+    </div>
+  </div>
+</header>
+<main class="stage">
+  {% include "_graph.html" %}
+  <aside id="inspector" class="inspector">{% include "_inspector_hint.html" %}</aside>
+  <svg id="leader-overlay" aria-hidden="true"><path id="inspector-leader"/></svg>
+</main>
+{% endblock %}

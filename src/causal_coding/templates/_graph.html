@@ -1,0 +1,30 @@
+<section id="graph-panel" class="graph-panel" data-view="{{ graph_view.view }}">
+  <div class="graph-scroll">
+    <svg class="causal-svg" width="100%" height="100%" role="img" aria-label="Causal graph from agentic coding to commercial success">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker>
+      </defs>
+      <g id="viewport">
+        {% for p in graph_view.edges %}
+          <g class="edge {{ p.edge.status.value }} {% if p.muted %}muted{% endif %} {% if p.focused %}focused{% endif %}" data-id="{{ p.edge.hypothesis }}" data-cause="{{ p.edge.cause }}" data-effect="{{ p.edge.effect }}">
+            <path d="{{ p.path }}" class="edge-line {{ p.edge.status.value }}" marker-end="url(#arrow)"/>
+            <path d="{{ p.path }}" class="edge-hit" hx-get="/edge/{{ p.edge.hypothesis }}?view={{ graph_view.view }}&target={{ graph_view.target }}" hx-target="#inspector" hx-swap="innerHTML"><title>{{ p.edge.cause.replace('_',' ') }} → {{ p.edge.effect.replace('_',' ') }} ({{ p.edge.sign }})</title></path>
+          </g>
+        {% endfor %}
+        {% for n in graph_view.nodes %}
+          <g class="node {{ n.stage.name|lower }} {% if n.target %}target{% endif %} {% if n.focused %}focused{% endif %} {% if n.muted %}muted{% endif %}" data-id="{{ n.id }}" data-stage="{{ n.stage.name|lower }}" transform="translate({{ n.x - 90 }},{{ n.y - 25 }})" hx-get="/focus/{{ n.id }}?view={{ graph_view.view }}&target={{ graph_view.target }}" hx-target="#graph-panel" hx-swap="outerHTML">
+            <title>{{ n.label }} — {{ n.stage.value }}</title>
+            <rect width="180" height="50" rx="16"/>
+            <text x="90" y="21" text-anchor="middle">{% set words=n.label.split(' ') %}{% if n.label|length < 23 %}{{ n.label }}{% else %}{{ ' '.join(words[:2]) }}{% endif %}</text>
+            {% if n.label|length >= 23 %}<text x="90" y="36" text-anchor="middle">{{ ' '.join(words[2:]) }}</text>{% endif %}
+          </g>
+        {% endfor %}
+      </g>
+    </svg>
+  </div>
+  <div class="zoom-controls">
+    <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
+    <button type="button" data-zoom="reset" aria-label="Reset view">⤢</button>
+    <button type="button" data-zoom="out" aria-label="Zoom out">−</button>
+  </div>
+</section>

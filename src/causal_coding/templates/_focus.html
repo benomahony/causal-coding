@@ -1,0 +1,16 @@
+{% include "_graph.html" %}
+<aside id="inspector" hx-swap-oob="innerHTML">
+  <button class="inspector-close" type="button" hx-get="/graph?view={{ view }}&target={{ target }}" hx-target="#graph-panel" hx-swap="outerHTML" aria-label="Close">&times;</button>
+  <div class="inspector-kicker">CAUSAL VARIABLE · {{ measurement.candidates[0].observability.value if measurement.candidates else 'latent' }}</div>
+  <h2>{{ node_id.replace('_',' ') }}</h2>
+  <p>{{ measurement.construct_definition }}</p>
+  <h3>How we could observe it</h3>
+  {% for metric in measurement.candidates %}
+    <div class="metric-card">
+      <strong>{{ metric.name.replace('_',' ') }}</strong>
+      <span>{{ metric.source.value }} · {{ metric.grain.value }} · {{ metric.observability.value }}</span>
+      <p>{{ metric.definition }}</p>
+      {% if metric.caveat %}<small>{{ metric.caveat }}</small>{% endif %}
+    </div>
+  {% endfor %}
+</aside>

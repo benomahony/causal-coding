@@ -1,0 +1,18 @@
+<button class="inspector-close" type="button" hx-get="/graph?view={{ view }}&target={{ target }}" hx-target="#graph-panel" hx-swap="outerHTML" aria-label="Close">&times;</button>
+<div class="inspector-kicker">{{ edge.hypothesis }} · {{ edge.status.value.replace('_',' ') }}</div>
+<h2>{{ edge.cause.replace('_',' ') }} <span class="arrow-text">→</span> {{ edge.effect.replace('_',' ') }}</h2>
+<div class="effect-pill {{ edge.sign }}">expected {{ edge.sign }}</div>
+<p>{{ edge.rationale }}</p>
+<h3>Evidence</h3>
+{% if evidence %}
+  {% for item in evidence %}
+  <article class="evidence-card {{ item.relation.value }}">
+    <div class="evidence-meta"><span>{{ item.relation.value }}</span><span>{{ item.evidence_type.value.replace('_',' ') }}</span><span>{{ item.directness.value }}</span></div>
+    <a href="{{ item.url }}" target="_blank" rel="noreferrer">{{ item.citation }}</a>
+    <p>{{ item.finding }}</p>
+    <small><strong>Population:</strong> {{ item.population }}</small>
+  </article>
+  {% endfor %}
+{% else %}
+  <div class="research-gap"><strong>Research gap</strong><p>No literature is attached to this causal claim yet. It remains an explicit hypothesis.</p></div>
+{% endif %}
