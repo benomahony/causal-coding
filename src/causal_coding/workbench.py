@@ -1,28 +1,21 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
 
 import networkx as nx
-import numpy as np
 
-from . import layout_metrics
+from .identifiability import coverage, is_estimable
 from .layout_metrics import (
-    HUB_ANGLE_THRESH,
-    IDEAL_EDGE_LENGTH,
     LayoutMetrics,
     compute_metrics,
     find_edge_node_intersections,
     find_parallel_bundles,
-    pair_parallel_weight,
-    segment_intersects_rect,
-    segments_intersect,
 )
 from .model import EDGES, Edge, graph
-
-METRIC_WEIGHTS = layout_metrics.WEIGHTS
 
 
 class Stage(StrEnum):
@@ -163,6 +156,7 @@ OVERVIEW_NODES = {
 class PositionedNode:
     id: str
     label: str
+    label_lines: tuple[str, ...]
     stage: Stage
     x: int
     y: int
@@ -177,6 +171,7 @@ class PositionedEdge:
     path: str
     muted: bool
     focused: bool
+    estimable: bool
 
 
 @dataclass(frozen=True)
@@ -188,33 +183,50 @@ class GraphView:
     focus: str | None
     target: str
     view: str
+    estimable_count: int
+    total_edges: int
 
 
-NODE_W = 180
-NODE_H = 50
-PADDING = 90
+NODE_W = 250
+NODE_H = 88
+PADDING = 150  # must clear NODE_W/2 and NODE_H/2, or the outermost nodes go off-canvas
 DEPTH_SPACING = 78.0
-SIM_ITERATIONS = 320
-SIM_SEED = 7
-REPULSION_SCALE = 45.0
-"""Repulsion range / initial scatter width grow as REPULSION_SCALE * sqrt(node_count), so a
-crowded causal-depth tier (typically many source/input nodes at the bottom) gets
-proportionally more room instead of every view starting from the same fixed-width band."""
+LABEL_MAX_CHARS_PER_LINE = 17
+LABEL_MAX_LINES = 3
 
-# ---- readability optimisation on top of the sim ----------------------------------------
-# The force sim above produces good *candidate* positions; it does not itself minimise
-# crossings, overlapping edges, or hub pile-up. SEEDS gives several deterministic starting
-# points, each refined by simulated annealing (_local_search) against the same objective
-# used to score them (layout_metrics.compute_metrics); the best-scoring candidate wins.
-SEEDS = (7, 13, 29, 41, 53)
-LOCAL_SEARCH_ITER_PER_NODE = 40
-ANNEAL_T0 = 500.0
-ANNEAL_T_MIN = 1.0
-ANNEAL_STEP0 = 40.0
-ANNEAL_STEP_MIN = 4.0
-WEIGHT_DEPTH_DEVIATION = 0.05
-SWAP_MOVE_PROB = 0.1
-JUMP_MOVE_PROB = 0.1
+# ---- layered (Sugiyama-style) layout -----------------------------------------------
+# Nodes are columned by causal depth -- the model's own topological ordering (every edge
+# strictly increases it) -- not by force simulation. A force-directed hairball is the wrong
+# tool for a graph that already has a real causal ordering; laying it out left-to-right by
+# that ordering is what makes a 70-node DAG legible instead of an organic tangle.
+# COLUMN_WIDTH/ROW_HEIGHT comfortably clear NODE_W/NODE_H, so the grid placement has no
+# node overlaps by construction -- no separate overlap-resolution pass is needed.
+COLUMN_WIDTH = 400.0
+ROW_HEIGHT = 130.0
+BARYCENTER_PASSES = 4
+
+
+def _wrap_label(label: str, *, max_chars: int = LABEL_MAX_CHARS_PER_LINE, max_lines: int = LABEL_MAX_LINES) -> tuple[str, ...]:
+    """Greedy word-wrap for node labels. Many variable names are 3 words / 20-30 characters
+    (e.g. "architecture constraint coverage") -- a fixed "first two words, rest on line two"
+    split (the previous approach) overflows the node box for exactly the longest labels,
+    which most need to wrap correctly. Once max_lines is reached, everything remaining is
+    appended to the last line rather than dropped -- overflowing text beats silently
+    truncated content."""
+    words = label.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if not current or len(candidate) <= max_chars or len(lines) == max_lines - 1:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return tuple(lines)
+
 
 MIN_ATTACH_SEP = math.radians(10)
 MAX_BEND = 60.0
@@ -262,278 +274,97 @@ def _causal_depth(dag: nx.DiGraph) -> dict[str, int]:
     return depth
 
 
-def _resolve_overlaps(
-    positions: dict[str, tuple[float, float]], gap_x: float, gap_y: float, iterations: int = 300
-) -> None:
-    """Push overlapping node boxes apart until none overlap. Mutates positions in place."""
-    nodes = list(positions)
-    for _ in range(iterations):
-        moved = False
-        for i in range(len(nodes)):
-            a = nodes[i]
-            ax, ay = positions[a]
-            for j in range(i + 1, len(nodes)):
-                b = nodes[j]
-                bx, by = positions[b]
-                dx, dy = bx - ax, by - ay
-                ox, oy = gap_x - abs(dx), gap_y - abs(dy)
-                if ox <= 0 or oy <= 0:
-                    continue
-                moved = True
-                if ox < oy:
-                    push = ox / 2 + 0.5
-                    sign = 1.0 if dx >= 0 else -1.0
-                    ax, bx = ax - sign * push, bx + sign * push
-                else:
-                    push = oy / 2 + 0.5
-                    sign = 1.0 if dy >= 0 else -1.0
-                    ay, by = ay - sign * push, by + sign * push
-                positions[a] = (ax, ay)
-                positions[b] = (bx, by)
-            positions[a] = (ax, ay)
-        if not moved:
-            break
+def _layered_positions(dag: nx.DiGraph) -> dict[str, tuple[float, float]]:
+    """Column each node by causal depth (longest path from a source -- every edge strictly
+    increases it by construction, so no edge is ever same-column or points backward,
+    unlike the coarser Stage grouping: ~48% of edges in the full model connect two nodes
+    in the same Stage bucket, which made Stage a poor column key even though it's a fine
+    *coloring* key).
 
-
-def _flow_positions(dag: nx.DiGraph, seed: int = SIM_SEED) -> dict[str, tuple[float, float]]:
-    """A real physics simulation (springs along edges + mutual repulsion), gently biased
-    bottom-to-top by causal depth so the story still reads inputs (bottom) -> commercial
-    success (top), without pinning every node to a rigid column/lane grid.
-
-    This produces a *candidate* layout only - readability (crossings, overlaps, hub
-    pile-up, space usage) is optimised afterwards by `_local_search` against the objective
-    in `layout_metrics.compute_metrics`, not by the physics itself."""
-    nodes = list(dag.nodes)
-    n = len(nodes)
-    if n == 0:
+    Edges spanning more than one column are expanded into a chain of per-column dummy
+    waypoints for the ordering pass (never for rendering -- only real nodes are returned).
+    Without this, a "shortcut" edge spanning many columns is invisible to the barycenter
+    heuristic in every intermediate column it passes through, which is what actually drove
+    crossings *up* in an earlier version of this function that used real predecessors/
+    successors directly: most edges in this model skip several depth-columns, so most of
+    the graph was invisible to its own ordering pass. Standard Sugiyama-style layered graph
+    drawing: the right tool for a DAG with a real causal ordering, instead of force-
+    simulating it into an organic hairball and hoping crossings stay low.
+    """
+    nodes = sorted(dag.nodes)
+    if not nodes:
         return {}
-    if n == 1:
-        return {nodes[0]: (0.0, 0.0)}
 
     depth = _causal_depth(dag)
-    idx = {node: i for i, node in enumerate(nodes)}
-    # SVG y grows downward, so rising causal depth needs decreasing y to read bottom -> top.
-    target_y = np.array([-depth[node] * DEPTH_SPACING for node in nodes], dtype=float)
+    col_of: dict[str, int] = dict(depth)
+    predecessors: dict[str, list[str]] = defaultdict(list)
+    successors: dict[str, list[str]] = defaultdict(list)
 
-    # Scatter width and repulsion range both grow with node count so a crowded tier (e.g.
-    # the many source/input nodes sharing the lowest causal depth) gets proportionally more
-    # room to spread into, instead of every view starting from the same fixed-width band.
-    scatter = REPULSION_SCALE * math.sqrt(n)
-    rng = np.random.default_rng(seed)
-    pos = np.stack([rng.uniform(-scatter, scatter, size=n), target_y], axis=1)
-    pos[:, 1] += rng.uniform(-20, 20, size=n)
+    dummy_counter = 0
+    for u, v in dag.edges:
+        prev = u
+        for ci in range(depth[u] + 1, depth[v]):
+            dummy_counter += 1
+            dummy_id = f"\0dummy{dummy_counter}"
+            col_of[dummy_id] = ci
+            successors[prev].append(dummy_id)
+            predecessors[dummy_id].append(prev)
+            prev = dummy_id
+        successors[prev].append(v)
+        predecessors[v].append(prev)
 
-    edge_pairs = [(idx[u], idx[v]) for u, v in dag.edges if u in idx and v in idx]
-    eu = np.array([p[0] for p in edge_pairs], dtype=int)
-    ev = np.array([p[1] for p in edge_pairs], dtype=int)
+    columns: dict[int, list[str]] = defaultdict(list)
+    for node_id in sorted(col_of):
+        columns[col_of[node_id]].append(node_id)
+    col_indices = sorted(columns)
 
-    ideal_edge = 210.0
-    min_sep = REPULSION_SCALE * math.sqrt(n)
-    for _ in range(SIM_ITERATIONS):
-        delta = pos[:, None, :] - pos[None, :, :]
-        dist = np.sqrt((delta**2).sum(-1))
-        np.fill_diagonal(dist, np.inf)
-        push = np.clip(min_sep - dist, 0, None) * 0.08
-        repulse = (delta / dist[..., None] * push[..., None]).sum(axis=1)
+    order: dict[str, int] = {}
+    for ci in col_indices:
+        for i, node_id in enumerate(columns[ci]):
+            order[node_id] = i
 
-        attract = np.zeros_like(pos)
-        if len(eu):
-            d = pos[ev] - pos[eu]
-            dist_e = np.sqrt((d**2).sum(-1)) + 1e-6
-            f = (dist_e - ideal_edge) * 0.02
-            fvec = d / dist_e[:, None] * f[:, None]
-            np.add.at(attract, eu, fvec)
-            np.add.at(attract, ev, -fvec)
+    def normalized(node_id: str) -> float:
+        column = columns[col_of[node_id]]
+        return order[node_id] / max(1, len(column) - 1)
 
-        gravity_y = (target_y - pos[:, 1]) * 0.03
+    def barycenter_pass(*, forward: bool) -> None:
+        scan = col_indices if forward else list(reversed(col_indices))
+        related = predecessors if forward else successors
+        for ci in scan:
 
-        pos[:, 0] += repulse[:, 0] + attract[:, 0]
-        pos[:, 1] += repulse[:, 1] + attract[:, 1] + gravity_y
+            def key(node_id: str, related: dict[str, list[str]] = related) -> tuple[float, str]:
+                neighbor_positions = [normalized(p) for p in related.get(node_id, ())]
+                if not neighbor_positions:
+                    return (normalized(node_id), node_id)
+                return (sum(neighbor_positions) / len(neighbor_positions), node_id)
 
-    return {node: (float(pos[i, 0]), float(pos[i, 1])) for node, i in idx.items()}
+            columns[ci].sort(key=key)
+            for i, node_id in enumerate(columns[ci]):
+                order[node_id] = i
 
+    for _ in range(BARYCENTER_PASSES):
+        barycenter_pass(forward=True)
+        barycenter_pass(forward=False)
 
-def _node_hub_score(node: str, positions: dict[str, tuple[float, float]], incident_edges: list[tuple[str, str]]) -> float:
-    """Penalty for edges leaving/entering `node` at nearly the same angle - same rule as
-    layout_metrics.find_hub_angle_conflicts, evaluated for one node so the local-search
-    loop can recompute just the handful of nodes actually affected by a move."""
-    if len(incident_edges) < 3:
-        return 0.0
-    ncx, ncy = positions[node]
-    angles = []
-    for u, v in incident_edges:
-        other = v if u == node else u
-        ocx, ocy = positions[other]
-        angles.append(math.atan2(ocy - ncy, ocx - ncx))
-    angles.sort()
-    m = len(angles)
-    score = 0.0
-    for i in range(m):
-        gap = abs(angles[i] - angles[(i + 1) % m]) % (2 * math.pi)
-        gap = min(gap, 2 * math.pi - gap)
-        if gap < HUB_ANGLE_THRESH:
-            score += HUB_ANGLE_THRESH - gap
-    return score
+    positions: dict[str, tuple[float, float]] = {}
+    for ci in col_indices:
+        col_nodes = columns[ci]
+        x = ci * COLUMN_WIDTH
+        col_span = (len(col_nodes) - 1) * ROW_HEIGHT
+        y0 = -col_span / 2.0
+        for i, node_id in enumerate(col_nodes):
+            positions[node_id] = (x, y0 + i * ROW_HEIGHT)
 
-
-def _local_search(
-    positions: dict[str, tuple[float, float]],
-    dag: nx.DiGraph,
-    target_y: dict[str, float],
-    *,
-    rng: np.random.Generator,
-) -> dict[str, tuple[float, float]]:
-    """Simulated annealing directly against the readability objective. The force sim above
-    gives a reasonable starting layout; this nudges (or occasionally jumps/swaps) one node
-    at a time and keeps the move only when it doesn't make things worse. Node overlap is a
-    hard constraint: a move that increases it is rejected outright, independent of
-    temperature, so "no node overlaps" can be a strict guarantee on the final output.
-
-    Only the terms that a single node's position actually affects are scored per move
-    (edges incident to it, the nodes it might now overlap, the hub angles at it and its
-    neighbours) - global terms like bounding-box aspect ratio and viewport utilisation are
-    evaluated once per candidate layout in `_best_layout`, not on every micro-move."""
-    nodes = list(dag.nodes)
-    n = len(nodes)
-    if n < 2:
-        return dict(positions)
-
-    edges = list(dag.edges)
-    incident: dict[str, list[tuple[str, str]]] = {node: [] for node in nodes}
-    neighbors: dict[str, set[str]] = {node: set() for node in nodes}
-    for u, v in edges:
-        incident[u].append((u, v))
-        incident[v].append((u, v))
-        neighbors[u].add(v)
-        neighbors[v].add(u)
-
-    gap_thresh = NODE_H * 0.6
-    half_w, half_h = NODE_W / 2, NODE_H / 2
-
-    def moved_score(moved: list[str], pos: dict[str, tuple[float, float]]) -> tuple[float, int]:
-        overlap = 0
-        for node in moved:
-            ncx, ncy = pos[node]
-            for other in nodes:
-                if other == node:
-                    continue
-                ocx, ocy = pos[other]
-                if abs(ncx - ocx) < NODE_W and abs(ncy - ocy) < NODE_H:
-                    overlap += 1
-        score = METRIC_WEIGHTS["node_overlap"] * overlap
-
-        seen_edges: set[tuple[str, str]] = set()
-        for node in moved:
-            for edge in incident[node]:
-                if edge in seen_edges:
-                    continue
-                seen_edges.add(edge)
-                p1, p2 = pos[edge[0]], pos[edge[1]]
-                length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-                score += METRIC_WEIGHTS["edge_length_excess"] * max(0.0, length - IDEAL_EDGE_LENGTH)
-                for other_node in nodes:
-                    if other_node in edge:
-                        continue
-                    ocx, ocy = pos[other_node]
-                    if segment_intersects_rect(p1, p2, ocx, ocy, half_w, half_h):
-                        score += METRIC_WEIGHTS["edge_node_intersection"]
-                for other_edge in edges:
-                    if other_edge == edge or edge[0] in other_edge or edge[1] in other_edge:
-                        continue
-                    p3, p4 = pos[other_edge[0]], pos[other_edge[1]]
-                    if segments_intersect(p1, p2, p3, p4):
-                        score += METRIC_WEIGHTS["edge_crossing"]
-                    weight = pair_parallel_weight(p1, p2, p3, p4, gap_thresh=gap_thresh)
-                    if weight:
-                        score += METRIC_WEIGHTS["edge_overlap"] * weight
-
-        # Edges not incident to a moved node may now pass through its (moved) rectangle.
-        for node in moved:
-            ncx, ncy = pos[node]
-            for edge in edges:
-                if node in edge:
-                    continue
-                p1, p2 = pos[edge[0]], pos[edge[1]]
-                if segment_intersects_rect(p1, p2, ncx, ncy, half_w, half_h):
-                    score += METRIC_WEIGHTS["edge_node_intersection"]
-
-        hub_nodes: set[str] = set(moved)
-        for node in moved:
-            hub_nodes.update(neighbors[node])
-        hub_score = sum(_node_hub_score(node, pos, incident[node]) for node in hub_nodes)
-        score += METRIC_WEIGHTS["hub_bunching"] * hub_score
-
-        for node in moved:
-            dy = pos[node][1] - target_y[node]
-            score += WEIGHT_DEPTH_DEVIATION * dy * dy
-
-        return score, overlap
-
-    positions = dict(positions)
-    xs = [p[0] for p in positions.values()]
-    ys = [p[1] for p in positions.values()]
-    x_lo, x_hi = min(xs), max(xs)
-    y_lo, y_hi = min(ys), max(ys)
-
-    total_iterations = max(1, LOCAL_SEARCH_ITER_PER_NODE * n)
-    for i in range(total_iterations):
-        t = i / total_iterations
-        temperature = ANNEAL_T0 * (ANNEAL_T_MIN / ANNEAL_T0) ** t
-        step = ANNEAL_STEP0 * (ANNEAL_STEP_MIN / ANNEAL_STEP0) ** t
-
-        roll = rng.random()
-        if roll < SWAP_MOVE_PROB:
-            i1, i2 = rng.choice(n, size=2, replace=False)
-            u, v = nodes[int(i1)], nodes[int(i2)]
-            moved = [u, v]
-            before, overlap_before = moved_score(moved, positions)
-            proposal = dict(positions)
-            proposal[u], proposal[v] = positions[v], positions[u]
-        else:
-            u = nodes[int(rng.integers(0, n))]
-            moved = [u]
-            before, overlap_before = moved_score(moved, positions)
-            proposal = dict(positions)
-            if roll < SWAP_MOVE_PROB + JUMP_MOVE_PROB:
-                proposal[u] = (float(rng.uniform(x_lo, x_hi)), float(rng.uniform(y_lo, y_hi)))
-            else:
-                dx, dy = rng.normal(0.0, step, size=2)
-                ux, uy = positions[u]
-                proposal[u] = (ux + float(dx), uy + float(dy))
-
-        after, overlap_after = moved_score(moved, proposal)
-        if overlap_after > overlap_before:
-            continue  # hard constraint: never let node overlap get worse
-
-        delta = after - before
-        if delta <= 0 or rng.random() < math.exp(-delta / max(temperature, 1e-6)):
-            positions = proposal
-
-    return positions
+    return {node: positions[node] for node in nodes}
 
 
 def _best_layout(dag: nx.DiGraph) -> tuple[dict[str, tuple[float, float]], LayoutMetrics, int]:
-    """Run several deterministic candidates (sim -> hard overlap resolution -> local search)
-    and keep the one that scores best on the full readability objective, including the
-    softer viewport/aspect-ratio terms that local search itself doesn't optimise move by
-    move."""
-    depth = _causal_depth(dag)
-    target_y = {node: -depth[node] * DEPTH_SPACING for node in dag.nodes}
-    dag_edges = list(dag.edges)
-
-    best_positions: dict[str, tuple[float, float]] | None = None
-    best_metrics: LayoutMetrics | None = None
-    best_seed: int | None = None
-    for seed in SEEDS:
-        positions = _flow_positions(dag, seed=seed)
-        _resolve_overlaps(positions, NODE_W + 40, NODE_H + 34)
-        positions = _local_search(positions, dag, target_y, rng=np.random.default_rng(seed + 1))
-        metrics = compute_metrics(positions, dag_edges, node_w=NODE_W, node_h=NODE_H)
-        if best_metrics is None or metrics.score < best_metrics.score:
-            best_positions, best_metrics, best_seed = positions, metrics, seed
-
-    assert best_positions is not None and best_metrics is not None and best_seed is not None
-    return best_positions, best_metrics, best_seed
+    """Deterministic layered layout -- no seed search needed since there's no randomness.
+    `seed` in the return is a vestige of the return shape `_compute_layout` expects
+    (surfaced by /graph/metrics); it's always 0 now."""
+    positions = _layered_positions(dag)
+    metrics = compute_metrics(positions, list(dag.edges), node_w=NODE_W, node_h=NODE_H)
+    return positions, metrics, 0
 
 
 TWO_PI = 2 * math.pi
@@ -541,9 +372,8 @@ TWO_PI = 2 * math.pi
 
 def _spread_angles(angles: list[float], min_sep: float = MIN_ATTACH_SEP) -> list[float]:
     """Push a set of angles (radians) apart on a circle so no two are closer than `min_sep`,
-    preserving their relative order. Same push-until-stable spirit as `_resolve_overlaps`,
-    but solved directly: cut the circle at its largest existing gap (so nothing has to wrap
-    around), then enforce minimum spacing left-to-right along that unrolled line."""
+    preserving their relative order: cut the circle at its largest existing gap (so nothing
+    has to wrap around), then enforce minimum spacing left-to-right along that unrolled line."""
     n = len(angles)
     if n < 2:
         return list(angles)
@@ -672,29 +502,34 @@ class _LayoutResult:
     seed: int
 
 
-def _build_dag(view: str, target: str) -> nx.DiGraph:
+def _build_dag(view: str, target: str, focus: str | None = None) -> nx.DiGraph:
     all_dag = graph()
     included = set(_nodes_for_view(view))
+    if view == "neighborhood":
+        center = focus if focus in all_dag else target
+        included = {center, *all_dag.predecessors(center), *all_dag.successors(center)}
     if target not in included and target in all_dag and view == "full":
         included.add(target)
 
     # Build a fresh graph with an explicitly sorted node/edge order rather than using
     # nx.DiGraph.subgraph(): that returns a filtered *view* whose own iteration order is
     # not stable across process restarts (unlike a real graph's dict-backed insertion
-    # order), which would silently break the "same seed -> same layout" guarantee, since
-    # _flow_positions matches nodes to RNG draws by iteration order.
+    # order), which downstream edge-routing tie-breaks (bundle/bend selection) depend on
+    # for reproducible output.
     dag = nx.DiGraph()
     dag.add_nodes_from(sorted(included))
-    dag.add_edges_from(sorted((u, v) for u, v in all_dag.edges if u in included and v in included))
+    dag.add_edges_from(sorted(
+        (cause, effect) for cause, effect in all_dag.edges
+        if cause in included and effect in included
+        and (view != "neighborhood" or center in {cause, effect})
+    ))
     return dag
 
 
 @lru_cache(maxsize=64)
-def _compute_layout(view: str, target: str) -> _LayoutResult:
-    """The expensive part - multi-seed sim + local search + routing - run once per
-    (view, target) and cached, since positions never depend on `focus` (focus only toggles
-    which already-placed nodes/edges are shown as muted/highlighted)."""
-    dag = _build_dag(view, target)
+def _compute_layout(view: str, target: str, focus: str | None = None) -> _LayoutResult:
+    """Cache deterministic placement and routing for each displayed subgraph."""
+    dag = _build_dag(view, target, focus)
 
     raw_positions, metrics, seed = _best_layout(dag)
     xs = [p[0] for p in raw_positions.values()]
@@ -714,9 +549,14 @@ def _compute_layout(view: str, target: str) -> _LayoutResult:
     )
 
 
-def layout(view: str = "overview", focus: str | None = None, target: str = "commercial_success") -> GraphView:
-    dag = _build_dag(view, target)
-    result = _compute_layout(view, target)
+def layout(
+    view: str = "overview",
+    focus: str | None = None,
+    target: str = "commercial_success",
+    observed: frozenset[str] = frozenset(),
+) -> GraphView:
+    dag = _build_dag(view, target, focus)
+    result = _compute_layout(view, target, focus if view == "neighborhood" else None)
     positions = {node: (x, y) for node, x, y in result.positions}
     paths = {(u, v): path for u, v, path in result.edge_paths}
 
@@ -725,6 +565,7 @@ def layout(view: str = "overview", focus: str | None = None, target: str = "comm
         PositionedNode(
             id=node,
             label=node.replace("_", " "),
+            label_lines=_wrap_label(node.replace("_", " ")),
             stage=stage_for(node),
             x=round(positions[node][0]),
             y=round(positions[node][1]),
@@ -737,7 +578,7 @@ def layout(view: str = "overview", focus: str | None = None, target: str = "comm
 
     positioned_edges = []
     for edge in EDGES:
-        if edge.cause not in dag or edge.effect not in dag:
+        if not dag.has_edge(edge.cause, edge.effect):
             continue
         positioned_edges.append(
             PositionedEdge(
@@ -745,8 +586,12 @@ def layout(view: str = "overview", focus: str | None = None, target: str = "comm
                 path=paths[(edge.cause, edge.effect)],
                 muted=focus is not None and (edge.cause not in related or edge.effect not in related),
                 focused=focus in {edge.cause, edge.effect},
+                estimable=is_estimable(edge.cause, edge.effect, observed),
             )
         )
+    # Coverage stat is over the *whole* causal model, not just the current view, so it
+    # doesn't jump around confusingly when switching between overview and full graph.
+    estimable_count, total_edges = coverage(observed)
 
     xs = [p[0] for p in positions.values()]
     ys = [p[1] for p in positions.values()]
@@ -761,4 +606,6 @@ def layout(view: str = "overview", focus: str | None = None, target: str = "comm
         focus=focus,
         target=target,
         view=view,
+        estimable_count=estimable_count,
+        total_edges=total_edges,
     )

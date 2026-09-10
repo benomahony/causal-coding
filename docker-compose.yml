@@ -1,0 +1,18 @@
+name: causal-coding
+
+services:
+  postgres:
+    image: postgres:18.4
+    volumes:
+      - causal-coding-postgres-storage:/var/lib/postgresql
+    restart: always
+    ports:
+      - "127.0.0.1:5433:5432"
+    environment:
+      POSTGRES_DB: causal_coding
+      POSTGRES_USER: causal_coding
+      POSTGRES_PASSWORD: causal_coding
+      TZ: UTC
+
+volumes:
+  causal-coding-postgres-storage:

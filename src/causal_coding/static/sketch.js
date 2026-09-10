@@ -1,440 +1,266 @@
 (function () {
   "use strict";
 
-  var DASH = { mixed: [8, 7], hypothesis: [1, 7] };
+  var transform = {scale: 1, x: 0, y: 0};
+  var graphKey = null;
+  var activeSvg = null;
+  var pointer = null;
+  var pointers = new Map();
+  var pinch = null;
+  var suppressClick = false;
+  var fitScale = 1;
+  var restoreGraphFocus = false;
 
-  function palette() {
-    var cs = getComputedStyle(document.documentElement);
-    var get = function (name, fallback) {
-      var v = cs.getPropertyValue(name).trim();
-      return v || fallback;
+  function panel() { return document.getElementById("graph-panel"); }
+  function svg() { return document.querySelector(".causal-svg"); }
+  function params(overrides) {
+    var current = panel();
+    return Object.assign({
+      view: current.dataset.view, target: current.dataset.target,
+      focus: current.dataset.focus || "", sources: current.dataset.sources
+    }, overrides || {});
+  }
+
+  function sourceSelection() {
+    return Array.from(document.querySelectorAll("#sources-form input:checked"))
+      .map(function (input) { return input.value; }).join(",") || "none";
+  }
+
+  window.workbench = {params: params, sourceSelection: sourceSelection};
+
+  function applyTransform() {
+    var current = svg();
+    if (!current) return;
+    current.querySelector("#viewport").setAttribute("transform",
+      "translate(" + transform.x + "," + transform.y + ") scale(" + transform.scale + ")");
+    var output = document.getElementById("zoom-level");
+    if (output) output.value = Math.round(transform.scale * 100) + "%";
+  }
+
+  function fit() {
+    var current = svg();
+    if (!current) return;
+    var bounds = current.querySelector("#viewport").getBBox();
+    var frame = current.getBoundingClientRect();
+    if (!bounds.width || !frame.width || !frame.height) return;
+    fitScale = Math.min((frame.width - 48) / bounds.width, (frame.height - 48) / bounds.height, 1.25);
+    transform = {
+      scale: fitScale,
+      x: frame.width / 2 - (bounds.x + bounds.width / 2) * fitScale,
+      y: frame.height / 2 - (bounds.y + bounds.height / 2) * fitScale
     };
-    return {
-      ink: get("--ink", "#000000"),
-      paper: get("--surface", "#ffffff"),
-      accent: get("--accent", "#003d4f"),
-      accent2: get("--accent2", "#f2617a"),
-      accent2Dark: get("--tw-flamingo-dark", "#d8455d"),
-      supported: get("--supported", "#6b9e78"),
-      supportedDark: get("--tw-jade-dark", "#4e7e5c"),
-      mixed: get("--mixed", "#cc850a"),
-      mixedDark: get("--tw-turmeric-dark", "#a66a05"),
-      mechanism: get("--mechanism", "#47a1ad"),
-      mechanismDark: get("--tw-sapphire-dark", "#2e7e89"),
-      hypothesis: get("--hypothesis", "#8a8a8a"),
-      amethyst: get("--tw-amethyst", "#634f7d"),
-    };
+    applyTransform();
   }
 
-  function stageColor(pal, slug) {
-    return (
-      {
-        inputs: pal.accent,
-        system: pal.mixed,
-        agent: pal.mechanism,
-        flow: pal.amethyst,
-        delivery: pal.ink,
-        product: pal.supported,
-        commercial: pal.accent2,
-      }[slug] || pal.ink
-    );
+  function zoom(factor, clientX, clientY) {
+    var current = svg();
+    if (!current) return;
+    var frame = current.getBoundingClientRect();
+    var anchorX = clientX === undefined ? frame.width / 2 : clientX - frame.left;
+    var anchorY = clientY === undefined ? frame.height / 2 : clientY - frame.top;
+    var scale = Math.min(3, Math.max(Math.min(fitScale, 0.08), transform.scale * factor));
+    var relative = scale / transform.scale;
+    transform.x = anchorX - (anchorX - transform.x) * relative;
+    transform.y = anchorY - (anchorY - transform.y) * relative;
+    transform.scale = scale;
+    applyTransform();
   }
 
-  function edgeColor(pal, statusClasses, focused) {
-    if (statusClasses.contains("literature_supported")) return focused ? pal.supportedDark : pal.supported;
-    if (statusClasses.contains("mixed")) return focused ? pal.mixedDark : pal.mixed;
-    if (statusClasses.contains("mechanistic")) return focused ? pal.mechanismDark : pal.mechanism;
-    return pal.hypothesis;
+  function setup() {
+    var current = svg();
+    if (!current) return;
+    var state = params();
+    var nextKey = state.view + "|" + (state.view === "neighborhood" ? state.focus : "") + "|" + state.target;
+    if (current !== activeSvg) {
+      current.removeAttribute("viewBox");
+      activeSvg = current;
+      pointers.clear();
+      pointer = null;
+      pinch = null;
+    }
+    if (nextKey !== graphKey) {
+      graphKey = nextKey;
+      fit();
+    } else {
+      applyTransform();
+    }
+    document.querySelectorAll("[data-view-choice]").forEach(function (button) {
+      var selected = button.dataset.viewChoice === state.view;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    if (restoreGraphFocus) {
+      var selectedNode = current.querySelector(".node.focused");
+      if (selectedNode) selectedNode.focus({preventScroll: true});
+      restoreGraphFocus = false;
+    }
   }
 
-  function seed(str) {
-    var h = 0;
-    for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
-    return (Math.abs(h) % 2147483646) + 1;
+  function closeSearch() {
+    document.getElementById("search-results").hidden = true;
+    document.getElementById("variable-search").setAttribute("aria-expanded", "false");
   }
 
-  var lastAnchor = null; // {x, y} in viewport coordinates, from the click that opened the inspector
+  function explore(variable) {
+    closeSearch();
+    var query = new URLSearchParams(params({view: "neighborhood", focus: variable}));
+    if (typeof htmx !== "undefined") {
+      htmx.ajax("GET", "/focus/" + encodeURIComponent(variable) + "?" + query,
+        {target: "#graph-panel", swap: "outerHTML"});
+    } else {
+      window.location.href = "/?" + query;
+    }
+  }
 
-  document.addEventListener(
-    "click",
-    function (evt) {
-      if (evt.target.closest(".node, .edge-hit")) {
-        lastAnchor = { x: evt.clientX, y: evt.clientY };
-      } else if (evt.target.closest(".inspector-close, .segmented button")) {
-        lastAnchor = null;
-      }
-    },
-    true
-  );
+  function search() {
+    var input = document.getElementById("variable-search");
+    var term = input.value.trim().toLowerCase().replaceAll("_", " ");
+    var count = 0;
+    document.querySelectorAll("[data-search-id]").forEach(function (button) {
+      var matches = button.dataset.label.toLowerCase().includes(term);
+      button.hidden = !matches || count >= 10;
+      if (matches) count++;
+    });
+    document.getElementById("no-results").hidden = count > 0;
+    document.getElementById("search-results").hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  }
 
-  function positionInspector() {
-    var inspector = document.getElementById("inspector");
-    var overlay = document.getElementById("leader-overlay");
-    var leader = document.getElementById("inspector-leader");
-    if (!inspector) return;
+  function editable(target) { return target.closest("input,textarea,select,[contenteditable=true]"); }
 
-    var isHint = !!inspector.querySelector(":scope > .hint");
-    if (isHint || !lastAnchor) {
-      inspector.classList.remove("anchored");
-      inspector.style.left = "";
-      inspector.style.top = "";
-      if (overlay) overlay.classList.remove("visible");
+  document.addEventListener("click", function (event) {
+    if (suppressClick && event.target.closest(".causal-svg")) {
+      suppressClick = false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
       return;
     }
-
-    var margin = 16;
-    var vw = window.innerWidth;
-    var vh = window.innerHeight;
-    var cardW = inspector.offsetWidth || 360;
-    var cardH = inspector.offsetHeight || 280;
-
-    var placeRight = lastAnchor.x + margin + cardW < vw - margin;
-    var left = placeRight
-      ? Math.min(lastAnchor.x + margin, vw - cardW - margin)
-      : Math.max(lastAnchor.x - margin - cardW, margin);
-    var top = Math.min(Math.max(lastAnchor.y - cardH / 2, margin), Math.max(vh - cardH - margin, margin));
-
-    inspector.classList.add("anchored");
-    inspector.style.left = left + "px";
-    inspector.style.top = top + "px";
-
-    if (overlay && leader) {
-      var cardEdgeX = placeRight ? left : left + cardW;
-      var cardEdgeY = Math.min(Math.max(lastAnchor.y, top + 18), top + cardH - 18);
-      var midX = (lastAnchor.x + cardEdgeX) / 2;
-      var d =
-        "M " +
-        lastAnchor.x.toFixed(1) +
-        " " +
-        lastAnchor.y.toFixed(1) +
-        " Q " +
-        midX.toFixed(1) +
-        " " +
-        lastAnchor.y.toFixed(1) +
-        " " +
-        cardEdgeX.toFixed(1) +
-        " " +
-        cardEdgeY.toFixed(1);
-      leader.setAttribute("d", d);
-      overlay.classList.add("visible");
+    var target = event.target.closest("[data-explore],[data-search-id]");
+    if (target) {
+      explore(target.dataset.explore || target.dataset.searchId);
+      return;
     }
-  }
-
-  function sketchify() {
-    if (typeof rough === "undefined") return;
-    var svg = document.querySelector("#graph-panel svg.causal-svg");
-    if (!svg) return;
-
-    var pal = palette();
-    var rc = rough.svg(svg);
-
-    svg.querySelectorAll(".edge").forEach(function (g) {
-      var old = g.querySelector(".sketch-edge");
-      if (old) old.remove();
-      var line = g.querySelector(".edge-line");
-      if (!line) return;
-      line.style.opacity = "";
-      var id = g.getAttribute("data-id") || line.getAttribute("d");
-      var isFocusedEdge = g.classList.contains("focused");
-      var options = {
-        seed: seed("edge-" + id),
-        roughness: 1.5,
-        bowing: 1.3,
-        stroke: edgeColor(pal, line.classList, isFocusedEdge),
-        strokeWidth: isFocusedEdge ? 3.4 : 2,
-        fill: "none",
-      };
-      var dashKey = line.classList.contains("mixed")
-        ? "mixed"
-        : line.classList.contains("hypothesis")
-          ? "hypothesis"
-          : null;
-      if (dashKey) options.strokeLineDash = DASH[dashKey];
-      var drawn = rc.path(line.getAttribute("d"), options);
-      drawn.setAttribute("class", "sketch-edge");
-      drawn.setAttribute("marker-end", "url(#arrow)");
-      drawn.style.pointerEvents = "none";
-      g.insertBefore(drawn, line);
+    var zoomButton = event.target.closest("[data-zoom]");
+    if (zoomButton) zoom(zoomButton.dataset.zoom === "in" ? 1.25 : 0.8);
+    if (event.target.closest("[data-reset-view]")) fit();
+    if (event.target.closest("[data-dismiss-error]")) document.getElementById("request-error").hidden = true;
+    var selectButton = event.target.closest("[data-sources-select]");
+    if (selectButton) document.querySelectorAll("#sources-form input").forEach(function (input) {
+      input.checked = selectButton.dataset.sourcesSelect === "all";
     });
+    if (!event.target.closest(".search")) closeSearch();
+  }, true);
 
-    svg.querySelectorAll(".node").forEach(function (g) {
-      var old = g.querySelector(".sketch-node");
-      if (old) old.remove();
-      var rect = g.querySelector("rect");
-      if (!rect) return;
-      var id = g.getAttribute("data-id") || "";
-      var stageSlug = g.getAttribute("data-stage") || "";
-      var isTarget = g.classList.contains("target");
-      var isFocused = g.classList.contains("focused");
-      var stroke = isFocused ? pal.accent2Dark : isTarget ? pal.accent : stageColor(pal, stageSlug);
-      var drawn = rc.rectangle(
-        0,
-        0,
-        parseFloat(rect.getAttribute("width")),
-        parseFloat(rect.getAttribute("height")),
-        {
-          seed: seed("node-" + id),
-          roughness: 1.7,
-          bowing: 1.6,
-          stroke: stroke,
-          strokeWidth: isFocused ? 3 : 1.8,
-          fill: isTarget ? pal.accent : pal.paper,
-          fillStyle: isTarget ? "solid" : "hachure",
-          hachureGap: 5,
-          fillWeight: 1,
-        }
-      );
-      drawn.setAttribute("class", "sketch-node");
-      drawn.style.pointerEvents = "none";
-      g.insertBefore(drawn, rect);
-    });
-
-    document.body.classList.add("sketch-ready");
-  }
-
-  // ---- Pan, zoom and node dragging -----------------------------------------
-  // The transform persists across htmx swaps (it lives here, not on the DOM),
-  // so clicking a node to trace its pathway doesn't reset your view.
-  var view = { scale: 1, tx: 0, ty: 0 };
-  var hasView = false;
-  var nodePositions = {}; // id -> {x, y} (top-left, content space)
-  var MIN_SCALE = 0.25;
-  var MAX_SCALE = 3;
-
-  function currentSvg() {
-    return document.querySelector("#graph-panel svg.causal-svg");
-  }
-
-  function viewportGroup(svg) {
-    return svg && svg.querySelector("#viewport");
-  }
-
-  function computeFit(svg) {
-    var content = viewportGroup(svg);
-    if (!content) return { scale: 1, tx: 0, ty: 0 };
-    var bbox = content.getBBox();
-    var rect = svg.getBoundingClientRect();
-    if (!bbox.width || !bbox.height || !rect.width || !rect.height) return { scale: 1, tx: 0, ty: 0 };
-    var pad = 48;
-    var scale = Math.min((rect.width - pad * 2) / bbox.width, (rect.height - pad * 2) / bbox.height);
-    scale = Math.min(Math.max(scale, MIN_SCALE), 1.3);
-    var tx = rect.width / 2 - (bbox.x + bbox.width / 2) * scale;
-    var ty = rect.height / 2 - (bbox.y + bbox.height / 2) * scale;
-    return { scale: scale, tx: tx, ty: ty };
-  }
-
-  function applyTransform(svg) {
-    var content = viewportGroup(svg);
-    if (!content) return;
-    content.setAttribute("transform", "translate(" + view.tx + "," + view.ty + ") scale(" + view.scale + ")");
-  }
-
-  function zoomBy(svg, factor, anchorX, anchorY) {
-    var rect = svg.getBoundingClientRect();
-    var mx = anchorX === undefined ? rect.width / 2 : anchorX - rect.left;
-    var my = anchorY === undefined ? rect.height / 2 : anchorY - rect.top;
-    var newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, view.scale * factor));
-    var cx = (mx - view.tx) / view.scale;
-    var cy = (my - view.ty) / view.scale;
-    view.scale = newScale;
-    view.tx = mx - cx * newScale;
-    view.ty = my - cy * newScale;
-    applyTransform(svg);
-  }
-
-  function readNodePositions(svg) {
-    nodePositions = {};
-    svg.querySelectorAll(".node").forEach(function (g) {
-      var m = /translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(g.getAttribute("transform") || "");
-      if (m) nodePositions[g.getAttribute("data-id")] = { x: parseFloat(m[1]), y: parseFloat(m[2]) };
-    });
-  }
-
-  function clipToBox(cx, cy, halfW, halfH, tx, ty) {
-    var dx = tx - cx;
-    var dy = ty - cy;
-    if (dx === 0 && dy === 0) return [cx, cy];
-    var candidates = [];
-    if (dx !== 0) candidates.push(halfW / Math.abs(dx));
-    if (dy !== 0) candidates.push(halfH / Math.abs(dy));
-    var t = Math.min.apply(null, candidates);
-    return [cx + dx * t, cy + dy * t];
-  }
-
-  function edgeD(causeId, effectId) {
-    var a = nodePositions[causeId];
-    var b = nodePositions[effectId];
-    if (!a || !b) return null;
-    var acx = a.x + 90,
-      acy = a.y + 25;
-    var bcx = b.x + 90,
-      bcy = b.y + 25;
-    var p1 = clipToBox(acx, acy, 90, 25, bcx, bcy);
-    var p2 = clipToBox(bcx, bcy, 90, 25, acx, acy);
-    return "M " + p1[0].toFixed(1) + " " + p1[1].toFixed(1) + " L " + p2[0].toFixed(1) + " " + p2[1].toFixed(1);
-  }
-
-  function updateEdgesFor(svg, nodeId) {
-    svg.querySelectorAll('.edge[data-cause="' + nodeId + '"], .edge[data-effect="' + nodeId + '"]').forEach(
-      function (g) {
-        var d = edgeD(g.getAttribute("data-cause"), g.getAttribute("data-effect"));
-        if (!d) return;
-        var line = g.querySelector(".edge-line");
-        var hit = g.querySelector(".edge-hit");
-        var sketch = g.querySelector(".sketch-edge");
-        if (line) line.setAttribute("d", d);
-        if (hit) hit.setAttribute("d", d);
-        if (sketch) sketch.style.opacity = "0";
-        if (line) line.style.opacity = "1";
-      }
-    );
-  }
-
-  var panState = null;
-  var dragState = null;
-  var suppressNextClick = false;
-
-  // All interaction listeners are delegated onto document/window exactly once
-  // and resolve the *current* svg dynamically - the svg itself is replaced on
-  // every htmx swap, so anything bound directly to it would leak on each swap.
-  function wireDelegatedInteractionsOnce() {
-    if (window.__causalGraphWired) return;
-    window.__causalGraphWired = true;
-
-    document.addEventListener(
-      "wheel",
-      function (evt) {
-        var svg = evt.target.closest && evt.target.closest("svg.causal-svg");
-        if (!svg) return;
-        evt.preventDefault();
-        var factor = Math.exp(-evt.deltaY * 0.0015);
-        zoomBy(svg, factor, evt.clientX, evt.clientY);
-      },
-      { passive: false }
-    );
-
-    document.addEventListener("dblclick", function (evt) {
-      var svg = evt.target.closest && evt.target.closest("svg.causal-svg");
-      if (!svg || evt.target.closest(".node, .edge-hit")) return;
-      view = computeFit(svg);
-      applyTransform(svg);
-    });
-
-    document.addEventListener("mousedown", function (evt) {
-      var svg = evt.target.closest && evt.target.closest("svg.causal-svg");
-      if (!svg) return;
-      var nodeEl = evt.target.closest(".node");
-      if (nodeEl) {
-        var pos = nodePositions[nodeEl.getAttribute("data-id")] || { x: 0, y: 0 };
-        dragState = {
-          id: nodeEl.getAttribute("data-id"),
-          x0: pos.x,
-          y0: pos.y,
-          startX: evt.clientX,
-          startY: evt.clientY,
-          moved: false,
-        };
-        evt.preventDefault();
-        return;
-      }
-      panState = { startX: evt.clientX, startY: evt.clientY, tx0: view.tx, ty0: view.ty, moved: false };
-      svg.classList.add("panning");
-    });
-
-    window.addEventListener("mousemove", function (evt) {
-      var svg = currentSvg();
-      if (!svg) return;
-      if (dragState) {
-        var el = svg.querySelector('.node[data-id="' + dragState.id + '"]');
-        if (!el) {
-          dragState = null;
-          return;
-        }
-        var dx = (evt.clientX - dragState.startX) / view.scale;
-        var dy = (evt.clientY - dragState.startY) / view.scale;
-        if (Math.abs(evt.clientX - dragState.startX) > 3 || Math.abs(evt.clientY - dragState.startY) > 3) {
-          dragState.moved = true;
-        }
-        var nx = dragState.x0 + dx;
-        var ny = dragState.y0 + dy;
-        el.setAttribute("transform", "translate(" + nx + "," + ny + ")");
-        nodePositions[dragState.id] = { x: nx, y: ny };
-        updateEdgesFor(svg, dragState.id);
-      } else if (panState) {
-        if (Math.abs(evt.clientX - panState.startX) > 3 || Math.abs(evt.clientY - panState.startY) > 3) {
-          panState.moved = true;
-        }
-        view.tx = panState.tx0 + (evt.clientX - panState.startX);
-        view.ty = panState.ty0 + (evt.clientY - panState.startY);
-        applyTransform(svg);
-      }
-    });
-
-    window.addEventListener("mouseup", function () {
-      var svg = currentSvg();
-      if (dragState) {
-        if (dragState.moved) {
-          suppressNextClick = true;
-          sketchify();
-        }
-        dragState = null;
-      }
-      if (panState) {
-        if (panState.moved) suppressNextClick = true;
-        panState = null;
-        if (svg) svg.classList.remove("panning");
-      }
-    });
-
-    document.addEventListener(
-      "click",
-      function (evt) {
-        if (suppressNextClick) {
-          evt.stopImmediatePropagation();
-          evt.preventDefault();
-          suppressNextClick = false;
-          return;
-        }
-        var zoomBtn = evt.target.closest("[data-zoom]");
-        if (zoomBtn) {
-          var svg = currentSvg();
-          if (!svg) return;
-          var action = zoomBtn.getAttribute("data-zoom");
-          if (action === "in") zoomBy(svg, 1.25);
-          else if (action === "out") zoomBy(svg, 0.8);
-          else {
-            view = computeFit(svg);
-            applyTransform(svg);
-          }
-        }
-      },
-      true
-    );
-  }
-
-  function setupGraph() {
-    var svg = currentSvg();
-    if (!svg) return;
-    if (!hasView) {
-      view = computeFit(svg);
-      hasView = true;
-    }
-    applyTransform(svg);
-    readNodePositions(svg);
-    wireDelegatedInteractionsOnce();
-  }
-
-  function onSettle() {
-    sketchify();
-    setupGraph();
-    positionInspector();
-  }
-
-  sketchify();
-  setupGraph();
-  positionInspector();
-  document.body.addEventListener("htmx:afterSettle", onSettle);
-  window.addEventListener("resize", function () {
-    positionInspector();
+  document.addEventListener("input", function (event) {
+    if (event.target.id === "variable-search") search();
   });
+  document.addEventListener("focusin", function (event) {
+    if (event.target.id === "variable-search") search();
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { closeSearch(); return; }
+    if (event.key === "/" && !editable(event.target)) {
+      event.preventDefault();
+      document.getElementById("variable-search").focus();
+      return;
+    }
+    if (event.target.closest(".search") && ["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) {
+      var results = Array.from(document.querySelectorAll("[data-search-id]:not([hidden])"));
+      var index = results.indexOf(document.activeElement);
+      if (event.key === "Enter" && event.target.id === "variable-search" && results.length) {
+        event.preventDefault(); explore(results[0].dataset.searchId);
+      } else if (event.key !== "Enter") {
+        event.preventDefault();
+        var next = event.key === "ArrowDown" ? index + 1 : index - 1;
+        if (next < 0) document.getElementById("variable-search").focus();
+        else if (results.length) results[Math.min(next, results.length - 1)].focus();
+      }
+      return;
+    }
+    if (editable(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "0") { event.preventDefault(); fit(); }
+    if (event.target.closest("#graph-panel")) {
+      if (["+", "=", "-"].includes(event.key)) {
+        event.preventDefault(); zoom(event.key === "-" ? 0.8 : 1.25);
+      }
+      if (["Enter", " "].includes(event.key) && event.target.matches(".node,.edge-hit")) {
+        event.preventDefault();
+        restoreGraphFocus = event.target.matches(".node");
+        event.target.dispatchEvent(new MouseEvent("click", {bubbles: true}));
+      }
+    }
+  });
+
+  document.addEventListener("wheel", function (event) {
+    if (!event.target.closest(".causal-svg")) return;
+    event.preventDefault();
+    zoom(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY);
+  }, {passive: false});
+
+  document.addEventListener("pointerdown", function (event) {
+    var current = event.target.closest(".causal-svg");
+    if (!current || event.button !== 0) return;
+    suppressClick = false;
+    pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    if (pointers.size === 2) {
+      var points = Array.from(pointers.values());
+      pinch = {distance: Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)};
+      pointer = null;
+      current.setPointerCapture(event.pointerId);
+      return;
+    }
+    if (event.target.closest(".node,.edge-hit")) return;
+    current.setPointerCapture(event.pointerId);
+    pointer = {id: event.pointerId, x: event.clientX, y: event.clientY, initialX: transform.x, initialY: transform.y, moved: false};
+    current.classList.add("panning");
+  });
+
+  document.addEventListener("pointermove", function (event) {
+    if (pointers.has(event.pointerId)) pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    if (pinch && pointers.size === 2) {
+      var points = Array.from(pointers.values());
+      var distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+      if (pinch.distance > 0) zoom(distance / pinch.distance, (points[0].x + points[1].x) / 2, (points[0].y + points[1].y) / 2);
+      pinch.distance = distance;
+      suppressClick = true;
+      return;
+    }
+    if (!pointer || pointer.id !== event.pointerId) return;
+    var deltaX = event.clientX - pointer.x;
+    var deltaY = event.clientY - pointer.y;
+    if (Math.hypot(deltaX, deltaY) > 4) pointer.moved = true;
+    transform.x = pointer.initialX + deltaX;
+    transform.y = pointer.initialY + deltaY;
+    applyTransform();
+  });
+
+  function finishPointer(event) {
+    pointers.delete(event.pointerId);
+    if (pointer && pointer.id === event.pointerId) {
+      suppressClick = pointer.moved;
+      pointer = null;
+    }
+    if (pointers.size < 2) pinch = null;
+    if (svg()) svg().classList.remove("panning");
+  }
+  document.addEventListener("pointerup", finishPointer);
+  document.addEventListener("pointercancel", finishPointer);
+  document.addEventListener("dblclick", function (event) {
+    if (event.target.closest(".causal-svg") && !event.target.closest(".node,.edge-hit")) fit();
+  });
+  ["htmx:responseError", "htmx:sendError", "htmx:timeout"].forEach(function (name) {
+    document.addEventListener(name, function () { document.getElementById("request-error").hidden = false; });
+  });
+  document.addEventListener("htmx:afterSettle", function (event) {
+    setup();
+    var target = event.detail.target;
+    if (window.matchMedia("(max-width: 760px)").matches && target && ["graph-panel", "inspector"].includes(target.id)) {
+      var destination = document.getElementById(target.id);
+      destination.scrollIntoView({block: "start", behavior: "instant"});
+    }
+  });
+  document.addEventListener("htmx:historyRestore", function () { graphKey = null; setup(); });
+  window.addEventListener("resize", fit);
+  setup();
 })();

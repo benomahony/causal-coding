@@ -8,7 +8,7 @@ The repository is still deliberately **pre-estimation**. It contains a causal th
 
 ```bash
 uv sync
-uv run causal-coding-workbench
+uv run ccw
 ```
 
 Open <http://127.0.0.1:8000>.
@@ -30,13 +30,13 @@ This makes competing paths visible. An agent can reduce implementation effort an
 
 The new product/commercial edges are intentionally marked as hypotheses pending the next literature pass; they are not presented as established causal facts.
 
-## Two graph views
+## Explore the model
 
-The default **Commercial pathways** view is curated for reasoning rather than completeness. It keeps the principal paths to commercial success visible and readable.
+The default **Focus view** starts at commercial success and shows only its direct causes and effects. Select a variable in the diagram or the details panel to explore its neighborhood. **Key pathways** provides a curated overview; **Full model** shows all 70 variables.
 
-**Full causal model** shows every variable and edge.
+Use the search box (or press `/`) to find any variable. Drag the background to pan, scroll or pinch to zoom, and press `0` to fit the graph. Graph nodes and links support keyboard focus and Enter/Space activation. The URL preserves the selected view, focus and source mode for refreshes and sharing.
 
-The primary graph is a force-directed layout, refined by a readability optimisation pass (minimising node overlaps, edge crossings, and overlapping/near-parallel edges) rather than a fixed grid. Selecting a node highlights its causal neighbourhood and opens its measurement definition. Selecting an edge opens its rationale and all attached supporting/contradicting literature.
+The graph uses deterministic layered placement. A separate, scrollable details panel keeps the diagram unobstructed. Selecting a link opens its rationale and supporting/contradicting literature. Slow DoWhy identification runs only when requested from the advanced section. Assets are served locally; the workbench does not need a CDN or external fonts.
 
 Evidence is visually distinguished as:
 
@@ -80,17 +80,50 @@ uv run causal-coding-evidence
 
 `measurements.py` maps every causal variable to candidate measurements with source, grain, observability, raw input fields, derivation and caveats.
 
-`events.py` contains normalised ingestion contracts for engineering telemetry. Product analytics and finance are now explicit data sources in the measurement model because a delivery-only dataset cannot answer the commercial question.
+`events.py` contains validated SQLModel ingestion contracts for engineering telemetry. Product analytics and finance are explicit data sources because a delivery-only dataset cannot answer the commercial question.
+
+### Live inputs versus source previews
+
+**Data sources → Apply source preview** asks which variables the selected categories could potentially support. **Clear all** means no sources; **Use live data** is a separate action.
+
+Live coverage checks per-metric tables and required fields. A revenue record cannot unlock cost records or gross margin. Proxy-only constructs and latent targets are never counted as directly observed. Missing instrumentation and measurements requiring joins remain explicit gaps. Rows marked `source_system="fixtures"` are reported separately and excluded from live coverage.
+
+Even complete raw inputs are **not an estimation-ready dataset**. Derivations, scope and time alignment, sample size, overlap and causal assumptions must still be validated. The graph's collection checklist and hypothetical source coverage make no claim that an effect is estimable. Formal identification concerns total effects under the specified DAG, not necessarily the direct arrow alone.
+
+### Initialise or upgrade the store
+
+The workbench works without a database. To persist events locally:
+
+```bash
+docker compose up -d postgres
+export CAUSAL_STORE_DB_HOST=127.0.0.1
+export CAUSAL_STORE_DB_PORT=5433
+export CAUSAL_STORE_DB_USER=causal_coding
+export CAUSAL_STORE_DB_PASSWORD=causal_coding
+export CAUSAL_STORE_DB_NAME=causal_coding
+uv run ccdb
+uv run ccw
+```
+
+`ccdb` creates or upgrades this project's tables only. The upgrade preserves event history, adds PR commit linkage, and makes unavailable PR/CI fields nullable. Legacy DevLake sizes and draft/required-check flags that were inferred are cleared once; re-ingest to populate trustworthy values. PostgreSQL and SQLite upgrades are supported. It never migrates the external DevLake database.
+
+`uv run ccs` optionally adds deterministic test fixtures. Fixtures do not establish real input coverage. Missing tables, unavailable databases and invalid connection settings leave theory exploration and source previews usable.
+
+The Compose database binds only to `127.0.0.1`. Its example credentials are for local development, not a shared deployment. Keep real credentials in your shell environment or an ignored `.env` file; the application does not automatically load `.env` files.
 
 ### DevLake as a concrete SCM/CI/CD/issue-tracker source
 
 `devlake/` is a real ingestion pipeline against [Apache DevLake](https://devlake.apache.org/)'s domain-layer MySQL database — DevLake exposes no query API for collected data, so this reads the domain layer directly, the same way Grafana and DevLake's own dashboards do.
 
 - `devlake/tables.py` — read-only SQLModel mappings onto DevLake's `pull_requests`, `commits`, `cicd_tasks`, `cicd_deployments`, `issues`, `incidents` and related tables.
-- `devlake/ingest.py` — `fetch_pull_requests`, `fetch_review_events`, `fetch_ci_runs`, `fetch_deployments`, `fetch_incidents`, `fetch_work_items`, each mapping DevLake rows onto this project's `events.py` contracts. Every function documents what DevLake's domain layer genuinely cannot supply (PR draft state, "required" CI check status, deployment rollback linkage, incident↔deployment attribution) rather than guessing.
+- `devlake/ingest.py` — reads PR-level additions/deletions and draft state from the current domain schema (requires DevLake's July 2024 PR migrations). It preserves historical PR commit associations and merge SHAs. Commit churn is never summed into final PR size; unavailable final file paths, required-check flags and deployment attribution remain unknown.
 - `devlake/config.py` — connection settings from `DEVLAKE_DB_HOST` / `DEVLAKE_DB_PORT` / `DEVLAKE_DB_USER` / `DEVLAKE_DB_PASSWORD` / `DEVLAKE_DB_NAME`, and `load_team_map` for a repo/project → `team_id` mapping maintained outside DevLake (the domain layer has no team concept).
 
 Records whose repo/project isn't in the team map are dropped rather than attributed to a guessed team; `Ingested.unmapped_scope_keys` reports what was skipped so gaps in the mapping are visible instead of silently wrong. `tests/test_devlake_ingest.py` exercises every mapping function against an in-memory SQLite database shaped like DevLake's schema, so the mapping logic is verified without a live DevLake instance.
+
+For PRs, CI runs, deployments and incidents, `since` is an inclusive **update watermark**. Creation, update and completion timestamps are considered; records without update metadata are conservatively refreshed. `observed_at` records snapshot collection time and can be supplied explicitly by the caller. Capture the next watermark before reading; overlapping snapshots are expected in the append-only store.
+
+`store/joins.py:deployed_changes()` joins the latest real PR and deployment snapshots by persisted commit identity, prefers merge SHAs, requires matching source/team and successful production delivery, and avoids double-counting redeployments. Historical PR associations can include rebased commits, so fallback attribution and the earliest linked commit still need validation against the source repository.
 
 Prospective instrumentation remains particularly important for:
 
@@ -128,6 +161,42 @@ uv run pytest
 ```
 
 The suite checks DAG validity, measurement coverage, evidence referential integrity, contradictory-evidence semantics, structural decompositions, the commercial-success paths, workbench routes, HTMX partials and semantic graph layout.
+
+Install the test tools with `uv sync --extra dev`. Run `uv run ruff check src tests` for lint. Regression tests cover sparse data, unknown fields, fixture exclusion, database failure, credential escaping, incremental updates, joins and legacy schema upgrades.
+
+To also exercise the PostgreSQL migration, set `CAUSAL_TEST_DB_URL` to a disposable PostgreSQL database URL before running `uv run pytest tests/test_postgres.py`. This test creates and removes a uniquely named schema; the database user needs permission to create schemas. Without the setting, it is skipped.
+
+The browser smoke test covers search, navigation, source previews, refresh/history, keyboard controls, mobile layout, offline assets and failed requests. With the workbench running and Node.js installed:
+
+```bash
+npm install --prefix /tmp/causal-browser-check playwright
+/tmp/causal-browser-check/node_modules/.bin/playwright install chromium
+WORKBENCH_URL=http://127.0.0.1:8000 node tests/browser_smoke.cjs /tmp/causal-browser-check/node_modules/playwright
+```
+
+`PLAYWRIGHT_BROWSER_PATH` can select an existing Chromium executable. Browser screenshots are saved to `/tmp/causal-coding-desktop.png` and `/tmp/causal-coding-mobile.png`.
+
+Export a standalone HTML/SVG model without optional plotting packages:
+
+```bash
+uv run causal-coding-graph --view full --output /tmp/causal-model.html
+```
+
+The original `causal-coding-workbench` and `causal-coding-evidence` command names remain supported aliases for `ccw` and `cce`.
+
+## Before pushing
+
+```bash
+uv sync --locked --extra dev
+uv run --locked pytest
+uv run --locked ruff check src tests
+uv build
+git diff --check
+git diff --cached --check
+git status --short
+```
+
+Commit the source, templates, static assets, tests and `uv.lock` together. Keep secrets, local databases, bytecode, test reports and generated graph exports out of Git. `.gitignore` covers these artifacts but does not untrack files that were already committed. Review both staged and unstaged changes before committing; new regression tests must be included alongside their fixes.
 
 ## Still not claimed
 

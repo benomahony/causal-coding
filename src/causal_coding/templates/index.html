@@ -1,27 +1,41 @@
 {% extends "base.html" %}
 {% block body %}
 <header class="topbar">
-  <div class="topbar-title">
-    <span class="eyebrow">Causal coding</span>
-    <h1>Does agentic coding create commercial value?</h1>
+  <a class="brand" href="/" aria-label="Causal coding home">
+    <span class="brand-wordmark" aria-hidden="true">causal<img class="brand-signal" src="{{ url_for('static', path='/causal-signal.svg') }}" width="29" height="29" alt="">coding<span class="brand-period">.</span></span>
+    <span class="brand-descriptor">A causal research workbench</span>
+  </a>
+  <span class="research-badge"><span class="research-label">Research, not hype</span><span>Theory before estimation</span></span>
+  <button class="button primary sources-btn" type="button" hx-get="/sources" hx-target="#inspector" hx-swap="innerHTML"
+    hx-vals="js:{...workbench.params()}">Data sources <span aria-hidden="true">↗</span></button>
+</header>
+<section class="workspace-heading">
+  <div><span class="eyebrow">THE COMMERCIAL QUESTION</span><h1>When does agentic coding create value?</h1><p>Explore the mechanisms, inspect the evidence, and see which inputs are still missing.</p></div>
+  {% include "_coverage_tag.html" %}
+</section>
+<nav class="workspace-tools" aria-label="Graph controls">
+  <div class="view-tabs" role="group" aria-label="Graph view">
+    {% for key, label in [('neighborhood','Focus view'),('overview','Key pathways'),('full','Full model')] %}
+    <button type="button" class="view-tab{% if view == key %} active{% endif %}" data-view-choice="{{ key }}" aria-pressed="{{ 'true' if view == key else 'false' }}"
+      hx-get="/graph" hx-target="#graph-panel" hx-swap="outerHTML" hx-vals="js:{...workbench.params({view: '{{ key }}'})}">{{ label }}</button>
+    {% endfor %}
   </div>
-  <div class="segmented">
-    <button hx-get="/graph?view=overview&target={{ target }}" hx-target="#graph-panel" hx-swap="outerHTML" class="{% if view == 'overview' %}active{% endif %}">Commercial pathways</button>
-    <button hx-get="/graph?view=full&target={{ target }}" hx-target="#graph-panel" hx-swap="outerHTML" class="{% if view == 'full' %}active{% endif %}">Full causal model</button>
-  </div>
-  <div class="topbar-meta">
-    <span class="target-tag">Target · Commercial success</span>
-    <div class="legend">
-      <span><i class="dot supported"></i> literature</span>
-      <span><i class="dot mixed"></i> mixed</span>
-      <span><i class="dot mechanism"></i> mechanism</span>
-      <span><i class="dot hypothesis"></i> hypothesis</span>
+  <div class="search">
+    <label class="sr-only" for="variable-search">Find a variable</label>
+    <span aria-hidden="true">⌕</span><input id="variable-search" type="search" placeholder="Find a variable…" autocomplete="off" aria-controls="search-results" aria-expanded="false">
+    <kbd>/</kbd>
+    <div id="search-results" class="search-results" hidden>
+      {% for node in search_nodes %}<button type="button" data-search-id="{{ node.id }}" data-label="{{ node.label }}"><span>{{ node.label }}</span><small>{{ node.stage }}</small></button>{% endfor %}
+      <p id="no-results" hidden>No matching variables. Try “review”, “agent” or “revenue”.</p>
     </div>
   </div>
-</header>
+  <button type="button" class="button quiet" data-reset-view title="Fit the visible graph (0)"><span>Fit<span class="fit-detail"> to screen</span></span> <kbd>0</kbd></button>
+</nav>
 <main class="stage">
   {% include "_graph.html" %}
-  <aside id="inspector" class="inspector">{% include "_inspector_hint.html" %}</aside>
-  <svg id="leader-overlay" aria-hidden="true"><path id="inspector-leader"/></svg>
+  <aside id="inspector" class="inspector" tabindex="-1" aria-label="Selected variable or data sources">
+    {% if measurement is defined %}{% include "_node_detail.html" %}{% else %}{% include "_inspector_hint.html" %}{% endif %}
+  </aside>
 </main>
+<footer class="workspace-footer"><span><span class="status-dot"></span> {{ node_count }} variables · {{ edge_count }} hypotheses · {{ evidence_count }} links with literature</span><span>Explore a theory. Build evidence. Test an effect.</span></footer>
 {% endblock %}

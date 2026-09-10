@@ -1,2 +1,5 @@
 {% include "_graph.html" %}
-<aside id="inspector" hx-swap-oob="innerHTML">{% include "_inspector_hint.html" %}</aside>
+<aside id="inspector" hx-swap-oob="innerHTML">
+{% if keep_panel %}{% include "_sources.html" %}{% elif measurement is defined %}{% include "_node_detail.html" %}{% else %}{% include "_inspector_hint.html" %}{% endif %}
+</aside>
+{% set oob = true %}{% include "_coverage_tag.html" %}

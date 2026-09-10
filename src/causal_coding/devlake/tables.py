@@ -23,8 +23,15 @@ class DevLakePullRequest(SQLModel, table=True):
     pull_request_key: str | None = None
     status: str | None = None
     created_date: datetime
+    updated_at: datetime | None = None
     merged_date: datetime | None = None
     closed_date: datetime | None = None
+    base_commit_sha: str | None = None
+    head_commit_sha: str | None = None
+    merge_commit_sha: str | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    is_draft: bool | None = None
 
 
 class DevLakePullRequestCommit(SQLModel, table=True):
@@ -71,6 +78,7 @@ class DevLakeCicdTask(SQLModel, table=True):
     status: str | None = None
     type: str | None = None
     created_date: datetime
+    updated_at: datetime | None = None
     started_date: datetime | None = None
     finished_date: datetime | None = None
 
@@ -91,6 +99,7 @@ class DevLakeCicdDeployment(SQLModel, table=True):
     status: str | None = None
     environment: str | None = None
     created_date: datetime
+    updated_at: datetime | None = None
     started_date: datetime | None = None
     finished_date: datetime | None = None
 
@@ -128,6 +137,7 @@ class DevLakeIncident(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     created_date: datetime | None = None
+    updated_at: datetime | None = None
     resolution_date: datetime | None = None
     severity: str | None = None
 

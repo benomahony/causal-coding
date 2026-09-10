@@ -1,19 +1,18 @@
 """Map DevLake domain-layer rows onto this project's normalised event contracts.
 
 Every function here is a best-effort translation, not a guarantee of
-completeness: DevLake's domain layer does not carry some fields this project's
-event contracts ask for (pull request draft state, deployment rollback
-linkage, "required" CI check status). Those are set to an explicit,
-documented default rather than guessed. See the docstring on each function for
-what is and isn't recoverable from DevLake alone.
+completeness: unavailable final changed-file paths, deployment rollback
+linkage and required-check status remain unknown. PR size and draft state
+come from the current domain schema. See each function for its limitations.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from causal_coding.events import CIRun, Deployment, Incident, PullRequest, ReviewEvent, WorkItem
@@ -24,7 +23,6 @@ from .tables import (
     DevLakeCicdPipelineCommit,
     DevLakeCicdTask,
     DevLakeCommit,
-    DevLakeCommitFile,
     DevLakeIncident,
     DevLakeIssue,
     DevLakeIssueChangelog,
@@ -51,16 +49,27 @@ class Ingested[T](BaseModel):
 
 
 def fetch_pull_requests(
-    session: Session, team_map: dict[str, str], *, since: datetime | None = None
+    session: Session, team_map: dict[str, str], *, since: datetime | None = None,
+    observed_at: datetime | None = None,
 ) -> Ingested[PullRequest]:
-    """Build PullRequest events from pull_requests (+ linked commits for size/first-commit).
+    """Read final PR size and draft state from DevLake's current domain schema.
 
-    Caveats: DevLake's domain layer does not track draft status, so
-    ``is_draft`` is always False.
+    Requires DevLake's July 2024 PR migrations. Commit links are historical and
+    additive, so they are retained for attribution but never summed as PR size.
+    Final changed-file paths are unavailable here and remain unknown.
+    `since` is an inclusive collection-update watermark, not a creation cohort.
+    Rows without an update timestamp are refreshed conservatively.
     """
+    observed_at = observed_at or datetime.now(UTC)
     query = select(DevLakePullRequest)
     if since is not None:
-        query = query.where(DevLakePullRequest.created_date >= since)
+        query = query.where(or_(
+            DevLakePullRequest.updated_at >= since,
+            DevLakePullRequest.updated_at.is_(None),
+            DevLakePullRequest.created_date >= since,
+            DevLakePullRequest.merged_date >= since,
+            DevLakePullRequest.closed_date >= since,
+        ))
     pr_rows = session.exec(query).all()
     pr_ids = [row.id for row in pr_rows]
 
@@ -77,11 +86,6 @@ def fetch_pull_requests(
     commits_by_sha = {
         c.sha: c for c in (session.exec(select(DevLakeCommit).where(DevLakeCommit.sha.in_(all_shas))).all() if all_shas else [])
     }
-    files_by_sha: dict[str, set[str]] = defaultdict(set)
-    if all_shas:
-        for f in session.exec(select(DevLakeCommitFile).where(DevLakeCommitFile.commit_sha.in_(all_shas))).all():
-            files_by_sha[f.commit_sha].add(f.file_path)
-
     events: list[PullRequest] = []
     unmapped: set[str] = set()
     for row in pr_rows:
@@ -93,24 +97,27 @@ def fetch_pull_requests(
 
         shas = shas_by_pr.get(row.id, [])
         commits = [commits_by_sha[s] for s in shas if s in commits_by_sha]
-        changed_files = tuple(sorted({path for s in shas for path in files_by_sha.get(s, ())}))
         first_commit_at = min((c.authored_date for c in commits if c.authored_date is not None), default=None)
 
         events.append(
-            PullRequest(
-                observed_at=row.created_date,
-                source_system=SOURCE_SYSTEM,
-                pull_request_id=row.id,
-                repository_id=row.base_repo_id or "",
-                team_id=team_id,
-                opened_at=row.created_date,
-                merged_at=row.merged_date,
-                closed_at=row.closed_date,
-                is_draft=False,
-                additions=sum(c.additions or 0 for c in commits),
-                deletions=sum(c.deletions or 0 for c in commits),
-                changed_files=changed_files,
-                first_commit_at=first_commit_at,
+            PullRequest.model_validate(
+                {
+                    "observed_at": observed_at,
+                    "source_system": SOURCE_SYSTEM,
+                    "pull_request_id": row.id,
+                    "repository_id": row.base_repo_id or "",
+                    "team_id": team_id,
+                    "opened_at": row.created_date,
+                    "merged_at": row.merged_date,
+                    "closed_at": row.closed_date,
+                    "is_draft": row.is_draft,
+                    "additions": row.additions,
+                    "deletions": row.deletions,
+                    "changed_files": None,
+                    "first_commit_at": first_commit_at,
+                    "commit_shas": sorted(set(shas) | ({row.head_commit_sha} if row.head_commit_sha else set())),
+                    "merge_commit_sha": row.merge_commit_sha,
+                }
             )
         )
     return Ingested(events=tuple(events), unmapped_scope_keys=frozenset(unmapped))
@@ -132,32 +139,39 @@ def fetch_review_events(
         query = query.where(DevLakePullRequestComment.created_date >= since)
     rows = session.exec(query).all()
     return tuple(
-        ReviewEvent(
-            observed_at=row.created_date,
-            source_system=SOURCE_SYSTEM,
-            pull_request_id=row.pull_request_id,
-            reviewer_id=row.account_id or "",
-            review_submitted_at=row.created_date,
-            state=row.status or row.type or "",
-            substantive=True,
+        ReviewEvent.model_validate(
+            {
+                "observed_at": row.created_date,
+                "source_system": SOURCE_SYSTEM,
+                "pull_request_id": row.pull_request_id,
+                "reviewer_id": row.account_id or "",
+                "review_submitted_at": row.created_date,
+                "state": row.status or row.type or "",
+                "substantive": True,
+            }
         )
         for row in rows
     )
 
 
-def fetch_ci_runs(session: Session, *, since: datetime | None = None) -> tuple[CIRun, ...]:
+def fetch_ci_runs(
+    session: Session, *, since: datetime | None = None, observed_at: datetime | None = None,
+) -> tuple[CIRun, ...]:
     """Build CIRun events from cicd_tasks, joined to cicd_pipeline_commits for commit_sha.
 
-    Caveats: DevLake does not track which checks are "required" -- every run
-    is emitted with `required=True`; filter/reclassify downstream if your
-    CI has optional jobs. `commit_sha` is "" when no pipeline-commit linkage
+    Caveats: DevLake does not track which checks are "required", so this stays
+    unknown. `commit_sha` is "" when no pipeline-commit linkage
     exists for the task's pipeline (e.g. manually triggered pipelines).
     `pull_request_id` is always None -- DevLake's domain layer does not link
     cicd_tasks to pull requests.
     """
+    observed_at = observed_at or datetime.now(UTC)
     query = select(DevLakeCicdTask)
     if since is not None:
-        query = query.where(DevLakeCicdTask.created_date >= since)
+        query = query.where(or_(
+            DevLakeCicdTask.updated_at >= since, DevLakeCicdTask.updated_at.is_(None),
+            DevLakeCicdTask.created_date >= since, DevLakeCicdTask.finished_date >= since,
+        ))
     task_rows = session.exec(query).all()
 
     pipeline_ids = [row.pipeline_id for row in task_rows if row.pipeline_id is not None]
@@ -171,26 +185,29 @@ def fetch_ci_runs(session: Session, *, since: datetime | None = None) -> tuple[C
         sha_by_pipeline.setdefault(link.pipeline_id, link.commit_sha)
 
     return tuple(
-        CIRun(
-            observed_at=row.created_date,
-            source_system=SOURCE_SYSTEM,
-            ci_run_id=row.id,
-            pull_request_id=None,
-            commit_sha=sha_by_pipeline.get(row.pipeline_id or "", ""),
-            check_category=row.type or "unknown",
-            required=True,
-            triggered_at=row.created_date,
-            started_at=row.started_date,
-            completed_at=row.finished_date,
-            result=row.result,
-            failure_classification=None,
+        CIRun.model_validate(
+            {
+                "observed_at": observed_at,
+                "source_system": SOURCE_SYSTEM,
+                "ci_run_id": row.id,
+                "pull_request_id": None,
+                "commit_sha": sha_by_pipeline.get(row.pipeline_id or "", ""),
+                "check_category": row.type or "unknown",
+                "required": None,
+                "triggered_at": row.created_date,
+                "started_at": row.started_date,
+                "completed_at": row.finished_date,
+                "result": row.result,
+                "failure_classification": None,
+            }
         )
         for row in task_rows
     )
 
 
 def fetch_deployments(
-    session: Session, team_map: dict[str, str], *, since: datetime | None = None
+    session: Session, team_map: dict[str, str], *, since: datetime | None = None,
+    observed_at: datetime | None = None,
 ) -> Ingested[Deployment]:
     """Build Deployment events from cicd_deployments (+ cicd_deployment_commits for repo/shas).
 
@@ -200,9 +217,15 @@ def fetch_deployments(
     linked commit; a deployment spanning multiple repos with different teams
     will be attributed to only one.
     """
+    observed_at = observed_at or datetime.now(UTC)
     query = select(DevLakeCicdDeployment)
     if since is not None:
-        query = query.where(DevLakeCicdDeployment.created_date >= since)
+        query = query.where(or_(
+            DevLakeCicdDeployment.updated_at >= since,
+            DevLakeCicdDeployment.updated_at.is_(None),
+            DevLakeCicdDeployment.created_date >= since,
+            DevLakeCicdDeployment.finished_date >= since,
+        ))
     deployment_rows = session.exec(query).all()
     deployment_ids = [row.id for row in deployment_rows]
 
@@ -232,24 +255,28 @@ def fetch_deployments(
         deployed_at = row.finished_date or row.started_date or row.created_date
 
         events.append(
-            Deployment(
-                observed_at=row.created_date,
-                source_system=SOURCE_SYSTEM,
-                deployment_id=row.id,
-                team_id=team_id,
-                environment=row.environment or "unknown",
-                status=row.result or row.status or "unknown",
-                deployed_at=deployed_at,
-                commit_shas=commit_shas,
-                manual_intervention=None,
-                deployment_type=None,
-                rollback_of_deployment_id=None,
+            Deployment.model_validate(
+                {
+                    "observed_at": observed_at,
+                    "source_system": SOURCE_SYSTEM,
+                    "deployment_id": row.id,
+                    "team_id": team_id,
+                    "environment": row.environment or "unknown",
+                    "status": row.result or row.status or "unknown",
+                    "deployed_at": deployed_at,
+                    "commit_shas": commit_shas,
+                    "manual_intervention": None,
+                    "deployment_type": None,
+                    "rollback_of_deployment_id": None,
+                }
             )
         )
     return Ingested(events=tuple(events), unmapped_scope_keys=frozenset(unmapped))
 
 
-def fetch_incidents(session: Session, *, since: datetime | None = None) -> tuple[Incident, ...]:
+def fetch_incidents(
+    session: Session, *, since: datetime | None = None, observed_at: datetime | None = None,
+) -> tuple[Incident, ...]:
     """Build Incident events from the incidents table.
 
     Caveat: `attributable_deployment_ids` is always empty. DevLake's
@@ -259,19 +286,25 @@ def fetch_incidents(session: Session, *, since: datetime | None = None) -> tuple
     Resolve task -> pipeline -> cicd_pipeline_commits -> cicd_deployment_commits
     yourself if you need that attribution, and treat it as approximate.
     """
+    observed_at = observed_at or datetime.now(UTC)
     query = select(DevLakeIncident)
     if since is not None:
-        query = query.where(DevLakeIncident.created_date >= since)
+        query = query.where(or_(
+            DevLakeIncident.updated_at >= since, DevLakeIncident.updated_at.is_(None),
+            DevLakeIncident.created_date >= since, DevLakeIncident.resolution_date >= since,
+        ))
     rows = session.exec(query).all()
     return tuple(
-        Incident(
-            observed_at=row.created_date or row.resolution_date,
-            source_system=SOURCE_SYSTEM,
-            incident_id=row.id,
-            started_at=row.created_date,
-            resolved_at=row.resolution_date,
-            severity=row.severity,
-            attributable_deployment_ids=(),
+        Incident.model_validate(
+            {
+                "observed_at": observed_at,
+                "source_system": SOURCE_SYSTEM,
+                "incident_id": row.id,
+                "started_at": row.created_date,
+                "resolved_at": row.resolution_date,
+                "severity": row.severity,
+                "attributable_deployment_ids": (),
+            }
         )
         for row in rows
         if row.created_date is not None
@@ -308,13 +341,15 @@ def fetch_work_items(
             continue
 
         events.append(
-            WorkItem(
-                observed_at=row.created_date,
-                source_system=SOURCE_SYSTEM,
-                work_item_id=row.issue_id,
-                team_id=team_id,
-                status=row.to_value or "",
-                status_changed_at=row.created_date,
+            WorkItem.model_validate(
+                {
+                    "observed_at": row.created_date,
+                    "source_system": SOURCE_SYSTEM,
+                    "work_item_id": row.issue_id,
+                    "team_id": team_id,
+                    "status": row.to_value or "",
+                    "status_changed_at": row.created_date,
+                }
             )
         )
     return Ingested(events=tuple(events), unmapped_scope_keys=frozenset(unmapped))

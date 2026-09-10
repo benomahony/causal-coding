@@ -2,11 +2,11 @@
 name = "causal-coding"
 version = "0.4.0"
 description = "An executable causal theory for agentic coding and software delivery"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "dowhy>=0.13",
   "networkx>=3.4",
-  "numpy>=1.26",
   "pandas>=2.2",
   "pydantic>=2.10",
   "pydot>=3.0",
@@ -15,11 +15,17 @@ dependencies = [
   "uvicorn>=0.35",
   "sqlmodel>=0.0.22",
   "pymysql>=1.1",
+  "psycopg[binary]>=3.2",
 ]
 
 [project.scripts]
 ccw = "causal_coding.web:main"
 cce = "causal_coding.evidence_report:main"
+ccs = "causal_coding.store.fixtures:main"
+ccdb = "causal_coding.store.schema:main"
+causal-coding-workbench = "causal_coding.web:main"
+causal-coding-evidence = "causal_coding.evidence_report:main"
+causal-coding-graph = "causal_coding.visualize:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.9", "httpx>=0.28", "hypothesis>=6.100"]

@@ -3,16 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Causal Coding Workbench</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Architects+Daughter&family=Bitter:wght@500;600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <meta name="theme-color" content="#f7f7f2">
+  <meta name="htmx-config" content='{"defaultSettleDelay":0}'>
+  <title>Causal coding · Research workbench</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/causal-signal.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', path='/workbench.css') }}">
-  <script src="https://unpkg.com/htmx.org@2.0.7" defer></script>
-  <script src="https://unpkg.com/roughjs@4.6.6/bundled/rough.js" defer></script>
+  <script src="{{ url_for('static', path='/vendor/htmx.min.js') }}" defer></script>
   <script src="{{ url_for('static', path='/sketch.js') }}" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#inspector">Skip to details</a>
   {% block body %}{% endblock %}
+  <div id="request-error" class="request-error" role="alert" hidden>That view could not be loaded. Your current view is unchanged. <button type="button" data-dismiss-error>Dismiss</button></div>
+  <noscript><p class="noscript">Enable JavaScript for graph navigation and source previews. The model and selected variable remain readable below.</p></noscript>
 </body>
 </html>

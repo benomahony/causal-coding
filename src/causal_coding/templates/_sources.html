@@ -1,0 +1,17 @@
+<div id="sources-panel">
+<div class="inspector-kicker">DATA SOURCES</div><h2>Plan your data collection.</h2>
+<p>Preview which variables a source could help measure. Selecting sources does not create observations or establish estimability.</p>
+<div class="status-card"><span class="status-title">{{ store_message }}</span><p>Real rows and test fixtures are counted separately. Live coverage also checks each variable’s required fields.</p>{% if not store_connected %}<details><summary>Connect or repair the store</summary><p>Set the <code>CAUSAL_STORE_DB_*</code> settings, run <code>uv run ccdb</code> to initialise or upgrade the schema, then restart the workbench.</p></details>{% endif %}</div>
+<button type="button" class="button full-width" hx-get="/graph" hx-target="#graph-panel" hx-swap="outerHTML" hx-vals="js:{...workbench.params({sources: 'connected', keep_panel: 'true'})}">Use live data</button>
+<form id="sources-form" hx-get="/graph" hx-target="#graph-panel" hx-swap="outerHTML" hx-sync="this:replace"
+  hx-vals="js:{...workbench.params({keep_panel: 'true', sources: workbench.sourceSelection()})}">
+  <div class="selection-actions"><button type="button" data-sources-select="all">Select all</button><button type="button" data-sources-select="none">Clear all</button></div>
+  {% for source in sources_summary %}
+  <label class="source-card"><input type="checkbox" value="{{ source.source }}" {% if source.source in selected_source_values %}checked{% endif %}>
+    <span class="source-info"><strong>{{ source.source|replace('_',' ')|capitalize }}</strong><small>{{ source.row_count }} real rows{% if source.fixture_row_count %} · {{ source.fixture_row_count }} fixture rows{% endif %}</small></span>
+    <span class="source-status{% if source.connected %} connected{% endif %}">{{ 'Data present' if source.connected else 'No real data' }}</span>
+  </label>
+  {% endfor %}
+  <div class="source-submit"><button type="submit" class="button primary full-width">Apply source preview <span class="htmx-indicator">…</span></button><small>Proxies and latent targets remain distinct from observed variables.</small></div>
+</form>
+</div>

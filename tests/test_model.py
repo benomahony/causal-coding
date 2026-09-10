@@ -2,7 +2,7 @@ import networkx as nx
 import pytest
 
 from causal_coding.data_requirements import missing_measurements
-from causal_coding.evidence import EvidenceRelation, LITERATURE
+from causal_coding.evidence import LITERATURE, EvidenceRelation
 from causal_coding.hypotheses import HYPOTHESES
 from causal_coding.measurements import MEASUREMENTS, Observability, measurement_for
 from causal_coding.model import EDGES, EdgeStatus, graph

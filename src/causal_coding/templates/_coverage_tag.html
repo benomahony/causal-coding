@@ -1,0 +1,5 @@
+<div id="coverage-tag" {% if oob is defined and oob %}hx-swap-oob="true"{% endif %} class="coverage-tag{% if not is_connected_mode %} preview{% endif %}" role="status">
+  <span class="coverage-label">{{ 'Live input coverage' if is_connected_mode else 'Hypothetical source preview' }}</span>
+  <strong>{{ available_count }} <small>/ {{ node_count }} variables</small></strong>
+  <span>{{ store_message if is_connected_mode else 'Potential coverage only · no observations implied' }}</span>
+</div>

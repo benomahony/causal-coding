@@ -1,0 +1,16 @@
+<div class="inspector-kicker">VARIABLE DETAILS</div>
+<h2>{{ node_id|replace('_',' ')|capitalize }}</h2><p class="description">{{ measurement.construct_definition }}</p>
+<div class="detail-section"><h3>Data readiness</h3>
+{% if data_summary %}
+  <div class="status-card {{ data_summary.status }}"><span class="status-title">{{ {'inputs_available':'Usable inputs present','proxy':'Proxy inputs only','latent':'Latent / decision target','needs_derivation':'Derivation or instrumentation needed','missing':'Inputs missing'}[data_summary.status] }}</span><p>{{ data_summary.explanation }}</p>
+  {% if data_summary.usable_row_count %}<small>{{ data_summary.usable_row_count }} usable input rows{% if data_summary.latest_observed_at %} · last collected {{ data_summary.latest_observed_at.strftime('%d %b %Y') }}{% endif %}</small>{% endif %}</div>
+{% else %}<div class="status-card"><span class="status-title">{{ store_message }}</span><p>Explore the theory now. Connect data to check the required input fields.</p></div>{% endif %}
+{% if not is_connected_mode %}<p class="preview-note">The graph is showing a hypothetical source preview. This panel always reports actual stored inputs.</p>{% endif %}
+</div>
+<div class="detail-section"><h3>What influences this? <span>{{ parents|length }}</span></h3><div class="connection-list">
+{% for parent in parents %}<button type="button" data-explore="{{ parent }}"><span>{{ parent|replace('_',' ')|capitalize }}</span><span aria-hidden="true">↗</span></button>{% else %}<p>No upstream variables are specified in this model.</p>{% endfor %}</div></div>
+<div class="detail-section"><h3>What does this influence? <span>{{ children|length }}</span></h3><div class="connection-list">
+{% for child in children %}<button type="button" data-explore="{{ child }}"><span>{{ child|replace('_',' ')|capitalize }}</span><span aria-hidden="true">↗</span></button>{% else %}<p>This is an outcome at the end of the model.</p>{% endfor %}</div></div>
+<div class="detail-section"><h3>How could we measure it?</h3>
+{% for metric in measurement.candidates %}<details class="metric-card"{% if loop.first %} open{% endif %}><summary>{{ metric.name|replace('_',' ')|capitalize }}</summary><div class="metric-body"><span class="metric-meta">{{ metric.observability.value }} · {{ metric.grain.value|replace('_',' ') }}</span><p>{{ metric.definition }}</p>{% if metric.aggregation %}<p class="formula">{{ metric.aggregation }}</p>{% endif %}{% if metric.caveat %}<p class="caveat">{{ metric.caveat }}</p>{% endif %}<details><summary>Required inputs</summary><ul>{% for field in metric.raw_inputs %}<li>{{ field|replace('_',' ') }}</li>{% endfor %}</ul></details></div></details>{% endfor %}
+</div>

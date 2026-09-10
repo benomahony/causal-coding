@@ -1,18 +1,16 @@
-<button class="inspector-close" type="button" hx-get="/graph?view={{ view }}&target={{ target }}" hx-target="#graph-panel" hx-swap="outerHTML" aria-label="Close">&times;</button>
-<div class="inspector-kicker">{{ edge.hypothesis }} · {{ edge.status.value.replace('_',' ') }}</div>
-<h2>{{ edge.cause.replace('_',' ') }} <span class="arrow-text">→</span> {{ edge.effect.replace('_',' ') }}</h2>
-<div class="effect-pill {{ edge.sign }}">expected {{ edge.sign }}</div>
-<p>{{ edge.rationale }}</p>
-<h3>Evidence</h3>
-{% if evidence %}
-  {% for item in evidence %}
-  <article class="evidence-card {{ item.relation.value }}">
-    <div class="evidence-meta"><span>{{ item.relation.value }}</span><span>{{ item.evidence_type.value.replace('_',' ') }}</span><span>{{ item.directness.value }}</span></div>
-    <a href="{{ item.url }}" target="_blank" rel="noreferrer">{{ item.citation }}</a>
-    <p>{{ item.finding }}</p>
-    <small><strong>Population:</strong> {{ item.population }}</small>
-  </article>
-  {% endfor %}
-{% else %}
-  <div class="research-gap"><strong>Research gap</strong><p>No literature is attached to this causal claim yet. It remains an explicit hypothesis.</p></div>
-{% endif %}
+<div class="inspector-kicker">CAUSAL LINK · {{ edge.hypothesis }}</div>
+<h2>{{ edge.cause|replace('_',' ')|capitalize }} <span class="arrow-text">→</span> {{ edge.effect|replace('_',' ') }}</h2>
+<div class="edge-badges"><span class="evidence-label {{ edge.status.value }}">{{ edge.status.value|replace('_',' ') }}</span><span class="effect-pill">Expected {{ edge.sign }}</span></div>
+<p class="description">{{ edge.rationale }}</p>
+<div class="detail-section"><h3>Supporting and conflicting evidence <span>{{ evidence|length }}</span></h3>
+{% for item in evidence %}<article class="evidence-card {{ item.relation.value }}"><div class="evidence-meta">{{ item.relation.value }} · {{ item.evidence_type.value|replace('_',' ') }}</div><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.citation }} <span aria-hidden="true">↗</span></a><p>{{ item.finding }}</p><details><summary>Study context</summary><p><strong>Population:</strong> {{ item.population }}</p><p><strong>Directness:</strong> {{ item.directness.value }}</p></details></article>{% else %}<div class="status-card"><span class="status-title">An open research question</span><p>No literature is attached yet. Treat this relationship as a hypothesis to test.</p></div>{% endfor %}
+</div>
+<div class="detail-section"><h3>Data collection checklist</h3><p>{{ 'Potential source coverage' if not is_connected_mode else 'Live input coverage' }} for the cause, effect and upstream adjustment variables:</p>
+<ul class="variable-checklist">{% for status in [estimability.cause_status, estimability.effect_status] + estimability.required_parents|list %}<li><span class="check-symbol {{ 'available' if status.observed else '' }}">{{ '✓' if status.observed else '○' }}</span><button type="button" data-explore="{{ status.variable }}">{{ status.variable|replace('_',' ')|capitalize }}</button><small>{{ 'inputs' if status.observed and is_connected_mode else ('potential' if status.observed else 'needed') }}</small></li>{% endfor %}</ul>
+<p class="caveat">Input presence does not establish estimability. Measurements must align by scope and time, with sufficient data and defensible causal assumptions.</p>
+</div>
+<details class="advanced"{% if identification_requested %} open{% endif %}><summary>Advanced: structural identification</summary>
+<p>Parent adjustment is a sufficient graphical check for the total effect, conditional on this DAG. It can miss alternative valid adjustment sets and does not isolate the direct arrow’s effect.</p>
+{% if identification_requested %}<p><strong>DoWhy adjustment set:</strong> {{ estimability.dowhy_adjustment_set|join(', ') if estimability.dowhy_adjustment_set else 'Empty under this model’s assumptions' }}</p>
+{% else %}<button type="button" class="button" hx-get="/edge/{{ edge.hypothesis }}?{{ query({'view': view, 'target': target, 'sources': sources_csv, 'identify': 'true'}) }}" hx-target="#inspector" hx-swap="innerHTML">Compute adjustment set <span class="htmx-indicator">…</span></button>{% endif %}
+</details>

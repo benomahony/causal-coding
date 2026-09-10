@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Engine
+from sqlalchemy import URL, Engine
 from sqlmodel import create_engine
 
 
@@ -44,12 +44,15 @@ class DevLakeConfig(BaseModel):
         )
 
     @property
-    def sqlalchemy_url(self) -> str:
-        return f"mysql+pymysql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
+    def sqlalchemy_url(self) -> URL:
+        return URL.create(
+            "mysql+pymysql", username=self.user, password=self.password,
+            host=self.host, port=self.port, database=self.database,
+        )
 
 
 def engine_from_config(config: DevLakeConfig) -> Engine:
-    return create_engine(config.sqlalchemy_url)
+    return create_engine(config.sqlalchemy_url, pool_pre_ping=True, connect_args={"connect_timeout": 3})
 
 
 def load_team_map(path: Path) -> dict[str, str]:

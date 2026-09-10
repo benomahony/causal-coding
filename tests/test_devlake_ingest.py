@@ -48,6 +48,10 @@ def test_fetch_pull_requests_maps_size_and_first_commit(session):
             status="MERGED",
             created_date=datetime(2026, 1, 1, tzinfo=UTC),
             merged_date=datetime(2026, 1, 3, tzinfo=UTC),
+            additions=8,
+            deletions=1,
+            is_draft=False,
+            merge_commit_sha="merge-sha",
         )
     )
     session.add(DevLakePullRequestCommit(pull_request_id="pr-1", commit_sha="sha-a"))
@@ -64,9 +68,11 @@ def test_fetch_pull_requests_maps_size_and_first_commit(session):
     assert len(result.events) == 1
     pr = result.events[0]
     assert pr.team_id == "team-checkout"
-    assert pr.additions == 15
-    assert pr.deletions == 3
-    assert set(pr.changed_files) == {"x.py", "y.py"}
+    assert pr.additions == 8
+    assert pr.deletions == 1
+    assert pr.changed_files is None
+    assert pr.commit_shas == ["sha-a", "sha-b"]
+    assert pr.merge_commit_sha == "merge-sha"
     # sqlite drops tzinfo on round-trip, matching DevLake's own naive datetime(3) columns.
     assert pr.first_commit_at == datetime(2026, 1, 1, 9, tzinfo=UTC).replace(tzinfo=None)
     assert pr.is_draft is False
@@ -137,7 +143,7 @@ def test_fetch_ci_runs_resolves_commit_via_pipeline(session):
 
     assert len(runs) == 1
     assert runs[0].commit_sha == "sha-a"
-    assert runs[0].required is True
+    assert runs[0].required is None
 
 
 def test_fetch_deployments_resolves_team_from_linked_repo(session):
@@ -162,7 +168,7 @@ def test_fetch_deployments_resolves_team_from_linked_repo(session):
     assert len(result.events) == 1
     deployment = result.events[0]
     assert deployment.team_id == "team-checkout"
-    assert deployment.commit_shas == ("sha-a",)
+    assert deployment.commit_shas == ["sha-a"]
     assert deployment.status == "SUCCESS"
     assert deployment.manual_intervention is None
 
@@ -179,7 +185,7 @@ def test_fetch_incidents_maps_severity_and_timing(session):
 
     assert len(incidents) == 1
     assert incidents[0].severity == "SEV2"
-    assert incidents[0].attributable_deployment_ids == ()
+    assert incidents[0].attributable_deployment_ids == []
 
 
 def test_fetch_work_items_uses_changelog_for_status_transitions(session):
