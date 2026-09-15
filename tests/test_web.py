@@ -46,6 +46,19 @@ def test_node_focus_returns_graph_and_oob_inspector() -> None:
     assert "agentic task share" in response.text
 
 
+def test_node_detail_shows_net_effect_on_target() -> None:
+    response = client.get("/focus/agentic_task_share?view=overview&target=commercial_success")
+    assert response.status_code == 200
+    assert "Net effect on commercial success" in response.text
+    assert "Ambiguous for commercial success" in response.text
+
+
+def test_node_detail_omits_net_effect_for_the_target_itself() -> None:
+    response = client.get("/focus/commercial_success?view=overview&target=commercial_success")
+    assert response.status_code == 200
+    assert "Net effect on" not in response.text
+
+
 def test_edge_detail_exposes_evidence() -> None:
     response = client.get("/edge/K6")
     assert response.status_code == 200

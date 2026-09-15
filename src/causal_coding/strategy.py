@@ -23,12 +23,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from functools import reduce
+from functools import cache, reduce
 from itertools import pairwise
 
 import networkx as nx
 
-from .model import EDGES, Edge, graph
+from .model import EDGES, Edge, EdgeStatus, graph
+
+_STRONG_STATUS = frozenset({EdgeStatus.LITERATURE_SUPPORTED, EdgeStatus.MECHANISTIC})
 
 
 class Sign(StrEnum):
@@ -138,22 +140,22 @@ def net_influence(cause: str, effect: str) -> NetInfluence:
     return NetInfluence(cause=cause, effect=effect, sign=net.get(effect, Sign.ZERO))
 
 
-def ambiguity_sources(cause: str, effect: str) -> tuple[Edge, ...]:
-    """The heterogeneous / unknown edges that lie on some directed path from cause
-    to effect. Resolving these is what would let `net_influence` reach a verdict,
-    so they are the priority targets for measurement."""
+def on_path_edges(cause: str, effect: str) -> tuple[Edge, ...]:
+    """Every edge that lies on some directed path from cause to effect, i.e. the
+    sub-DAG that actually carries the influence."""
     dag = graph()
     if cause not in dag or effect not in dag:
         return ()
     from_cause = nx.descendants(dag, cause) | {cause}
     to_effect = nx.ancestors(dag, effect) | {effect}
-    return tuple(
-        edge
-        for edge in EDGES
-        if edge.cause in from_cause
-        and edge.effect in to_effect
-        and _EDGE_SIGN[edge.sign] is Sign.AMBIGUOUS
-    )
+    return tuple(edge for edge in EDGES if edge.cause in from_cause and edge.effect in to_effect)
+
+
+def ambiguity_sources(cause: str, effect: str) -> tuple[Edge, ...]:
+    """The heterogeneous / unknown edges that lie on some directed path from cause
+    to effect. Resolving these is what would let `net_influence` reach a verdict,
+    so they are the priority targets for measurement."""
+    return tuple(edge for edge in on_path_edges(cause, effect) if _EDGE_SIGN[edge.sign] is Sign.AMBIGUOUS)
 
 
 def gating_variables(cause: str, effect: str) -> tuple[str, ...]:
@@ -174,3 +176,52 @@ def gating_variables(cause: str, effect: str) -> tuple[str, ...]:
         if not nx.has_path(reduced, cause, effect):
             gates.append(node)
     return tuple(sorted(gates, key=order.__getitem__))
+
+
+@dataclass(frozen=True)
+class Strategy:
+    """A directional claim the model can currently defend: cause moves effect in
+    a determinate direction, and every edge carrying it is evidence-backed."""
+
+    cause: str
+    effect: str
+    sign: Sign
+    hops: int
+    literature_edges: int
+    mechanistic_edges: int
+    edge_count: int
+
+
+@cache
+def confident_strategies() -> tuple[Strategy, ...]:
+    """Every net influence in the whole graph that is both sign-determinate and
+    carried entirely by literature-supported or mechanistic edges, so no untested
+    hypothesis or contradictory ('mixed') edge is load-bearing.
+
+    Ranked by literature support first, then directness (fewest hops). A robust
+    grade means every individual link is evidence-backed; a longer chain still
+    composes more assumptions than a short one, which is why `hops` is reported.
+    These are qualitative directional statements, never magnitudes."""
+    dag = graph()
+    strategies = []
+    for cause in dag.nodes:
+        for effect in nx.descendants(dag, cause):
+            if net_influence(cause, effect).sign not in (Sign.POSITIVE, Sign.NEGATIVE):
+                continue
+            edges = on_path_edges(cause, effect)
+            if not all(edge.status in _STRONG_STATUS for edge in edges):
+                continue
+            strategies.append(
+                Strategy(
+                    cause=cause,
+                    effect=effect,
+                    sign=net_influence(cause, effect).sign,
+                    hops=nx.shortest_path_length(dag, cause, effect),
+                    literature_edges=sum(edge.status is EdgeStatus.LITERATURE_SUPPORTED for edge in edges),
+                    mechanistic_edges=sum(edge.status is EdgeStatus.MECHANISTIC for edge in edges),
+                    edge_count=len(edges),
+                )
+            )
+    return tuple(
+        sorted(strategies, key=lambda s: (-s.literature_edges, s.hops, s.edge_count, s.cause, s.effect))
+    )

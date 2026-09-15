@@ -4,16 +4,19 @@ from functools import reduce
 
 import networkx as nx
 
-from causal_coding.model import graph
+from causal_coding.model import EDGES, EdgeStatus, graph
 from causal_coding.strategy import (
+    _STRONG_STATUS,
     Sign,
     _plus,
     _times,
     ambiguity_sources,
+    confident_strategies,
     directed_paths,
     edge_sign,
     gating_variables,
     net_influence,
+    on_path_edges,
 )
 
 
@@ -92,6 +95,43 @@ def test_gates_lie_on_every_path_and_exclude_endpoints():
     assert cause not in gates and effect not in gates
     for path in directed_paths(cause, effect):
         assert set(gates) <= set(path.nodes)
+
+
+def test_confident_strategies_are_determinate_and_fully_evidence_backed():
+    """Every returned strategy has a committed sign and no hypothesis / mixed edge
+    carries it -- that is the definition of the confidence filter."""
+    strategies = confident_strategies()
+    assert strategies
+    for s in strategies:
+        assert s.sign in (Sign.POSITIVE, Sign.NEGATIVE)
+        assert net_influence(s.cause, s.effect).sign is s.sign
+        for edge in on_path_edges(s.cause, s.effect):
+            assert edge.status in _STRONG_STATUS
+        assert s.literature_edges + s.mechanistic_edges == s.edge_count
+
+
+def test_confident_strategies_ranked_best_first():
+    strategies = confident_strategies()
+    keys = [(-s.literature_edges, s.hops, s.edge_count, s.cause, s.effect) for s in strategies]
+    assert keys == sorted(keys)
+
+
+def test_highest_confidence_strategy_is_small_batch_reduces_lead_time():
+    """The single most literature-backed determinate claim in the model, and
+    tellingly it is about delivery flow, not agents (every agent path is
+    ambiguous, so none qualifies)."""
+    top = confident_strategies()[0]
+    assert (top.cause, top.effect, top.sign) == ("small_batch_discipline", "lead_time", Sign.NEGATIVE)
+    assert top.literature_edges >= 3
+    assert all(s.cause != "agentic_task_share" for s in confident_strategies())
+
+
+def test_confident_strategies_excludes_any_hypothesis_or_mixed_carried_effect():
+    covered = {(s.cause, s.effect) for s in confident_strategies()}
+    weak = {e.status for e in EDGES if e.status not in _STRONG_STATUS}
+    assert EdgeStatus.HYPOTHESIS in weak  # sanity: the model does contain weak edges
+    for cause, effect in covered:
+        assert all(edge.status in _STRONG_STATUS for edge in on_path_edges(cause, effect))
 
 
 def test_ambiguity_sources_only_reports_on_path_heterogeneous_edges():
