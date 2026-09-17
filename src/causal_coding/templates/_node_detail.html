@@ -1,5 +1,9 @@
 <div class="inspector-kicker">VARIABLE DETAILS</div>
 <h2>{{ node_id|replace('_',' ')|capitalize }}</h2><p class="description">{{ measurement.construct_definition }}</p>
+{% if node_id != target %}<div class="detail-section"><h3>Net effect on {{ target|replace('_',' ') }}</h3>
+<div class="edge-badges"><span class="effect-pill">{{ {'+':'Increases','-':'Reduces','?':'Ambiguous for','0':'No modelled path to'}[net_effect.sign.value] }} {{ target|replace('_',' ') }}</span></div>
+<p class="caveat">{% if net_effect.sign.value == '?' %}A positive and a negative path compete, or a heterogeneous edge lies between them, so the theory does not commit to a direction.{% elif net_effect.sign.value == '0' %}No directed path reaches {{ target|replace('_',' ') }} in this model.{% else %}Net qualitative direction under the current signed DAG. Direction only, never magnitude.{% endif %}</p></div>
+{% endif %}
 <div class="detail-section"><h3>Data readiness</h3>
 {% if data_summary %}
   <div class="status-card {{ data_summary.status }}"><span class="status-title">{{ {'inputs_available':'Usable inputs present','proxy':'Proxy inputs only','latent':'Latent / decision target','needs_derivation':'Derivation or instrumentation needed','missing':'Inputs missing'}[data_summary.status] }}</span><p>{{ data_summary.explanation }}</p>

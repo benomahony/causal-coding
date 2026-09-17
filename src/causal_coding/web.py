@@ -19,6 +19,7 @@ from .measurements import Source, measurement_for
 from .model import EDGES, Edge, graph
 from .store import StoreConfig, all_sources_summary, engine_from_config, observed_variables
 from .store.coverage import SourceSummary, VariableDataSummary, variable_summaries
+from .strategy import net_influence
 from .workbench import NODE_H, NODE_W, _compute_layout, layout, stage_for
 
 PACKAGE = Path(__file__).parent
@@ -123,6 +124,7 @@ def add_node_detail(data: dict, node_id: str) -> None:
         measurement=measurement_for(node_id), node_id=node_id,
         data_summary=data["variables"].get(node_id),
         parents=sorted(dag.predecessors(node_id)), children=sorted(dag.successors(node_id)),
+        net_effect=net_influence(node_id, data["target"]),
     )
 
 
